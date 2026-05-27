@@ -1,79 +1,143 @@
-# 飞书文档爬取助手 — 部署与使用指南
+# 飞书文档爬取助手 — Feishu Doc Crawler
 
-## 项目概述
+一个 Chrome 浏览器扩展（Manifest V3），能够从飞书 Wiki 知识库中提取文档内容，保存为本地 Markdown 格式文件。支持单篇提取和批量提取，自动处理表格、图片、高亮块、内嵌电子表格等飞书特有元素。
 
-飞书文档爬取助手是一个 Chrome 浏览器扩展（Manifest V3），能够从飞书 Wiki 知识库中提取文档内容，保存为本地 Markdown 文件。支持单篇提取和批量提取，自动处理表格、图片、高亮块等飞书特有元素。
+---
+
+## 目录
+
+- [功能特性](#功能特性)
+- [环境要求](#环境要求)
+- [必装依赖](#必装依赖)
+- [安装步骤](#安装步骤)
+- [使用方法](#使用方法)
+- [输出结构](#输出结构)
+- [项目架构](#项目架构)
+- [API 接口](#api-接口)
+- [常见问题](#常见问题)
+- [故障排查](#故障排查)
+- [开发调试](#开发调试)
+
+---
+
+## 功能特性
+
+- **侧边栏目录自动发现**：自动扫描飞书 Wiki 知识库的侧边栏目录，无需手动输入 URL
+- **批量提取**：支持全选或勾选任意文章，一次性导出多个 .md 文件
+- **子文档递归展开**：选中带 📁 标记的目录节点，自动递归展开所有子文档
+- **Markdown 格式转换**：飞书富文本完整转换为标准 Markdown
+  - 表格 → Markdown 表格（含嵌套富文本清洗）
+  - 高亮块（Callout）→ `> **emoji 标题**\n> 内容`
+  - 代码块 → 保留 fenced code block
+  - 内嵌电子表格 → 自动读取并转为 Markdown 表格
+- **图片本地下载**：自动下载文档中的图片到 `images/` 子目录，Markdown 中使用相对路径引用
+- **智能过滤**：自动跳过头像、图标、emoji 等无关图片
+- **目录持久化**：首次选择保存文件夹后，下次打开自动恢复（通过 IndexedDB + chrome.storage）
+- **非首页自动发现**：在知识库子页面使用插件时，自动回溯到根页面获取完整目录
 
 ---
 
 ## 环境要求
 
-| 依赖 | 说明 |
-| --- | --- |
-| Chrome 浏览器 | 88 及以上版本（支持 Manifest V3） |
-| Python 3.9+ | 运行本地 API 服务 |
-| lark-cli | 飞书 CLI 工具，用于调用飞书 OpenAPI |
-| macOS / Linux | 当前仅在这两个平台测试过 |
+| 依赖 | 最低版本 | 说明 |
+|------|----------|------|
+| Chrome 浏览器 | 88+ | 支持 Manifest V3，建议使用最新稳定版 |
+| Python | 3.9+ | 运行本地 API 服务 |
+| lark-cli | 最新版 | 飞书 CLI 工具，调用飞书 OpenAPI |
+| macOS / Linux | — | 当前仅在这两个平台测试通过 |
 
-### 安装 lark-cli
+> **Windows 用户**：理论上可以运行，但 `lark-cli` 的安装方式和路径可能不同，需要自行调整 `feishu_server.py` 中的 `LARK_CLI` 路径。
+
+---
+
+## 必装依赖
+
+### 1. 安装 Python 3
+
+macOS 通常已预装 Python 3。确认版本：
 
 ```bash
-# macOS (Homebrew)
+python3 --version
+# 需要输出 Python 3.9.x 或更高版本
+```
+
+如果未安装或版本过低，可通过 Homebrew 安装：
+
+```bash
+brew install python@3.11
+```
+
+### 2. 安装 lark-cli（飞书命令行工具）
+
+这是**最关键的依赖**，负责调用飞书 OpenAPI 读取文档内容。
+
+#### macOS
+
+```bash
+# 通过 Homebrew 安装
 brew install lark-cli
 
 # 验证安装
 lark-cli --version
+```
 
-# 首次使用需要认证
+默认安装路径：`/opt/homebrew/bin/lark-cli`（Apple Silicon）或 `/usr/local/bin/lark-cli`（Intel）。
+
+#### Linux
+
+请参考飞书开放平台文档获取 Linux 安装方式，或使用 Docker。
+
+### 3. lark-cli 用户认证（必须完成！）
+
+安装 `lark-cli` 后，**必须完成认证**才能读取飞书文档：
+
+```bash
 lark-cli auth login
 ```
 
-`lark-cli` 默认安装路径为 `/opt/homebrew/bin/lark-cli`。如果你的安装路径不同，需要修改 `feishu_server.py` 第 22 行的 `LARK_CLI` 变量。
+此命令会打开浏览器，引导你完成飞书账号授权登录。登录成功后，`lark-cli` 会将认证凭证保存在本地。
 
----
+**验证认证状态**：
 
-## 项目结构
-
+```bash
+lark-cli auth whoami
+# 应显示你的飞书用户信息
 ```
-飞书文档爬取插件/
-├── manifest.json              # Chrome 扩展配置
-├── feishu_server.py           # 本地 API 服务（Python）
-├── .space_cache.json          # 空间根页面缓存（自动生成）
-│
-├── popup/
-│   ├── popup.html             # 弹出窗口界面
-│   ├── popup.js               # 弹出窗口逻辑
-│   └── popup.css              # 弹出窗口样式
-│
-├── content/
-│   └── content.js             # 内容脚本：侧边栏目录扫描
-│
-├── background/
-│   └── background.js          # Service Worker
-│
-├── lib/
-│   └── turndown.js            # HTML → Markdown 转换库
-│
-└── icons/
-    ├── icon16.png
-    ├── icon48.png
-    └── icon128.png
+
+> ⚠️ **重要**：`lark-cli` 的认证 token 有时效性。如果某天插件报错「API 服务未启动」或「lark-cli failed」，请先重新执行 `lark-cli auth login` 刷新认证。
+
+### 4. 修改 lark-cli 路径（如果安装路径不同）
+
+如果你的 `lark-cli` 不在 `/opt/homebrew/bin/lark-cli`，需要修改 `feishu_server.py` 第 22 行：
+
+```python
+# 找到这一行（约第 89 行）：
+LARK_CLI = '/opt/homebrew/bin/lark-cli'
+
+# 改为你的实际路径，例如：
+LARK_CLI = '/usr/local/bin/lark-cli'
+```
+
+你可以通过以下命令找到 `lark-cli` 的实际路径：
+
+```bash
+which lark-cli
 ```
 
 ---
 
-## 部署步骤
+## 安装步骤
 
 ### 第一步：启动本地 API 服务
 
-在终端中执行：
+打开终端，进入项目目录并启动 Python 服务：
 
 ```bash
-cd /Users/yaoxiong/Downloads/app-dev/飞书文档爬取插件
+cd /path/to/飞书文档爬取插件
 python3 feishu_server.py
 ```
 
-成功启动后显示：
+成功启动后终端会显示：
 
 ```
 🚀 飞书文档爬取 API 服务已启动
@@ -84,140 +148,353 @@ python3 feishu_server.py
    Ctrl+C 停止服务
 ```
 
-**请保持此终端窗口运行**，关闭终端会导致 API 服务停止。
+> ⚠️ **请保持此终端窗口运行！** 关闭终端会导致 API 服务停止，插件将无法工作。
 
-如需指定端口：
+如需指定其他端口：
 
 ```bash
-python3 feishu_server.py --port 8765
+python3 feishu_server.py --port 8888
+# 同时需要修改 popup.js 第 4 行的 API_BASE
 ```
 
 ### 第二步：安装 Chrome 扩展
 
-1. 打开 Chrome 浏览器，地址栏输入 `chrome://extensions/`
+1. 打开 Chrome 浏览器，地址栏输入 `chrome://extensions/` 并回车
 2. 打开右上角的「**开发者模式**」开关
-3. 点击「**加载已解压的扩展程序**」
-4. 选择项目目录：`/Users/yaoxiong/Downloads/app-dev/飞书文档爬取插件`
-5. 确认扩展已出现在列表中，名称为「**飞书文档爬取助手**」
+3. 点击左上角「**加载已解压的扩展程序**」
+4. 在弹出的文件选择器中，选择项目文件夹（包含 `manifest.json` 的目录）
+5. 确认扩展「**飞书文档爬取助手**」出现在列表中
 
-> 安装后如果修改了扩展代码，在 `chrome://extensions/` 页面点击扩展卡片上的刷新图标即可重新加载。
+> 💡 安装后如果修改了扩展代码，在 `chrome://extensions/` 页面点击扩展卡片上的 **刷新图标**（🔄）即可重新加载。
 
 ### 第三步：验证安装
 
-访问任意飞书文档页面（如 `https://zcnv4hck1o2h.feishu.cn/wiki/XDpDwz1YbiUffSkAchpclPgAnrg`），点击 Chrome 工具栏的扩展图标，应该能看到弹出窗口显示页面结构和文章列表。
+1. 打开任意飞书知识库文档页面，例如：
+   `https://zcnv4hck1o2h.feishu.cn/wiki/XDpDwz1YbiUffSkAchpclPgAnrg`
+2. 点击 Chrome 工具栏右侧的**拼图图标**，找到「飞书文档爬取助手」并点击
+3. 弹出窗口应显示：
+   - 页面标题
+   - 侧边栏目录中的文章列表（带复选框）
+   - API 服务状态（绿色圆点 = 正常）
+
+如果弹出窗口显示「请在飞书文档页面使用此插件」，说明当前页面不是飞书文档页。
 
 ---
 
 ## 使用方法
 
-### 基本流程
+### 基本流程（5 步完成）
 
-1. **打开飞书文档** — 在 Chrome 中访问飞书 Wiki 知识库的根页面
-2. **点击扩展图标** — 弹出窗口会自动分析侧边栏目录
-3. **勾选目标文章** — 勾选需要爬取的文章（支持全选/取消全选）
-4. **选择保存文件夹** — 点击「选择文件夹」按钮指定输出目录
-5. **开始爬取** — 点击「开始爬取」按钮，等待完成
+1. **打开飞书知识库根页面** — 在 Chrome 中访问包含完整侧边栏目录的知识库页面
+2. **点击扩展图标** — 自动分析侧边栏目录并显示文章列表
+3. **勾选目标文章** — 勾选需要爬取的文章，或点击「全选」导出全部
+4. **选择保存文件夹** — 点击「选择文件夹」按钮指定本地输出目录
+5. **开始爬取** — 点击「开始爬取」按钮，等待进度条完成
 
 ### 两种提取模式
 
 | 模式 | 操作 | 输出 |
-| --- | --- | --- |
-| 部分提取 | 勾选若干篇文章 | 仅生成对应的 .md 文件 |
-| 全部提取 | 点击「全选」后开始 | 生成所有目录文章的 .md 文件 + images/ 子文件夹 |
+|------|------|------|
+| 单篇提取 | 仅勾选一篇文章 | 生成 1 个 .md 文件 |
+| 批量提取 | 全选或多选 | 生成 N 个 .md 文件 + images/ 子文件夹 |
 
-### 输出结构
+### 📁 带子文档的节点
+
+文章列表中带 📁 标记的条目表示该节点下还有子文档。勾选后会自动递归展开所有子文档并一并导出。
+
+### 文件名命名规则
+
+- 以文章标题作为文件名，非法字符自动替换为 `_`
+- 同名文章自动追加序号（`_2`、`_3`...）
+- 文件名最大长度 100 个字符
+
+### 文件夹持久化
+
+首次选择保存文件夹后，插件会自动记住。下次打开弹窗时：
+- 如果显示正常文件夹名 → 可以直接使用，无需重新选择
+- 如果显示 ⚠️ 标记 → 点击一次「选择文件夹」按钮重新授权即可（不会弹出文件选择器）
+
+如需更换保存文件夹，点击「选择文件夹」并选择新目录即可。
+
+---
+
+## 输出结构
 
 ```
 你选择的文件夹/
+├── 如何使用本知识库（持续更新中）.md
 ├── 一、为什么要学这套AI画图方法？.md
 ├── 二、工具准备：选择适合自己的工具即可.md
 ├── 三、核心技能：两步将废话变为神图.md
-├── ...
+├── 四、提示词优化原则+平台组合策略.md
+├── 五、设计美学速成：让你的图更高级.md
+├── 六、实战演练：从0到1做出第一组图.md
+├── 七、案例灵感库：1000+提示词案例.md
+├── 实操常见问题答疑篇（会持续更新）.md
 └── images/
     ├── 一、为什么要学这套AI画图方法？_1.png
     ├── 二、工具准备：选择适合自己的工具即可_1.png
     └── ...
 ```
 
-### 文件夹持久化
-
-首次选择保存文件夹后，插件会通过 IndexedDB 持久化目录句柄。下次使用时无需重新选择，除非主动更改。
+Markdown 文件中图片使用相对路径引用：`![alt](./images/xxx_1.png)`
 
 ---
 
-## API 接口说明
+## 项目架构
 
-本地服务提供以下 HTTP 接口：
+```
+飞书文档爬取插件/
+├── manifest.json              # Chrome 扩展清单（Manifest V3）
+├── feishu_server.py           # 本地 API 服务（Python HTTP Server）
+├── .space_cache.json          # 空间根页面缓存（自动生成，已加入 .gitignore）
+│
+├── popup/                     # 弹出窗口
+│   ├── popup.html             #   界面结构
+│   ├── popup.js               #   业务逻辑 & API 通信
+│   └── popup.css              #   样式
+│
+├── content/                   # 内容脚本（注入飞书页面）
+│   └── content.js             #   侧边栏目录 DOM 扫描（API 失败时的回退方案）
+│
+├── background/                # Service Worker
+│   └── background.js          #   图片下载 & 扩展生命周期管理
+│
+├── lib/                       # 第三方库
+│   └── turndown.js            #   HTML → Markdown 转换（DOM 回退方案使用）
+│
+├── icons/                     # 扩展图标
+│   ├── icon16.png
+│   ├── icon48.png
+│   └── icon128.png
+│
+└── .gitignore
+```
+
+### 数据流
+
+```
+飞书页面（侧边栏目录）
+    │
+    ▼
+Chrome Extension (popup.js)
+    │  POST /discover { url }
+    ▼
+Python API Server (feishu_server.py)
+    │  lark-cli wiki +node-get / +node-list
+    │  (调用飞书 OpenAPI 获取文档节点树)
+    ▼
+返回文章列表 ──► popup.js 渲染复选框列表
+    │
+    │  用户勾选并点击「开始爬取」
+    ▼
+POST /extract { token }
+    │  lark-cli docs +fetch (获取 Markdown)
+    │  lark-cli docs +media-preview (下载图片)
+    ▼
+返回 Markdown 内容 ──► popup.js 写入本地文件系统
+                       (File System Access API)
+```
+
+---
+
+## API 接口
+
+本地 Python 服务监听 `http://127.0.0.1:8765`，提供以下接口：
 
 ### 健康检查
 
 ```
-GET http://127.0.0.1:8765/health
+GET /health
+→ { "status": "ok", "service": "feishu-crawler-server" }
 ```
 
 ### 发现子文档
 
 ```
-POST http://127.0.0.1:8765/discover
+POST /discover
 Content-Type: application/json
 
-{ "token": "XDpDwz1YbiUffSkAchpclPgAnrg" }
+{
+  "url": "https://xxx.feishu.cn/wiki/TOKEN"
+}
 ```
 
-返回该文档下的所有子文档列表（含标题和 doc_token）。
+返回：
+
+```json
+{
+  "title": "知识库标题",
+  "page_token": "XDpDwz1YbiUffSkAchpclPgAnrg",
+  "articles": [
+    {
+      "title": "一、为什么要学这套AI画图方法？",
+      "doc_token": "abc123...",
+      "url": "https://internal.feishu.cn/wiki/abc123",
+      "has_child": false
+    }
+  ]
+}
+```
 
 ### 提取单篇文档
 
 ```
-POST http://127.0.0.1:8765/extract
+POST /extract
 Content-Type: application/json
 
-{ "token": "XDpDwz1YbiUffSkAchpclPgAnrg" }
+{
+  "token": "XDpDwz1YbiUffSkAchpclPgAnrg"
+}
 ```
 
-返回文档的 Markdown 内容、标题和图片列表。
+返回：
 
-### 批量提取
+```json
+{
+  "title": "文档标题",
+  "content": "## 第一章\n\n正文内容...",
+  "images": [
+    { "url": "https://...", "file_token": "img_xxx", "ext": "png" }
+  ],
+  "token": "..."
+}
+```
+
+### 下载图片
 
 ```
-POST http://127.0.0.1:8765/extract-batch
+POST /download-image
 Content-Type: application/json
 
-{ "tokens": ["token1", "token2", "token3"] }
+{
+  "file_token": "img_xxx"
+}
+→ { "ok": true, "data": "<base64>", "size": 12345 }
 ```
-
----
-
-## 功能特性
-
-- 侧边栏目录自动发现，无需手动输入 URL
-- 多文档批量提取，自动识别根页面并缓存
-- 飞书富文本表格正确转换为 Markdown 表格
-- 图片自动下载到本地 `images/` 目录，MD 中使用相对路径引用
-- 高亮块（callout）转为 Markdown 引用块格式
-- 内嵌电子表格（sheet）自动读取并转换为 Markdown 表格
-- 自动过滤头像、图标等无关图片
 
 ---
 
 ## 常见问题
 
-**Q: 弹出窗口显示"无法连接服务器"？**
+### Q: 弹出窗口显示「API 服务未启动」？
 
-A: 确认 `feishu_server.py` 正在运行，且端口 8765 未被占用。在终端执行 `curl http://127.0.0.1:8765/health` 验证。
+**A:** 确认 `feishu_server.py` 正在运行。在终端执行以下命令验证：
 
-**Q: 爬取的内容不完整？**
+```bash
+curl http://127.0.0.1:8765/health
+```
 
-A: 当前版本依赖 `lark-cli` 调用飞书 OpenAPI。如果文档包含大量内嵌电子表格，提取可能较慢。确保在知识库的根页面（包含完整侧边栏目录的页面）使用插件。
+如果返回 `{"status": "ok"}`，说明服务正常。否则需要重新启动 `python3 feishu_server.py`。
 
-**Q: 在子页面使用插件只能看到当前页？**
+### Q: 弹出窗口显示「请在飞书文档页面使用此插件」？
 
-A: 插件会自动检测并尝试定位根页面。如果自动发现失败，请手动导航到知识库首页再使用。
+**A:** 当前页面不是飞书文档。请先导航到飞书知识库页面（URL 包含 `feishu.cn/wiki/`）。
 
-**Q: 如何更新扩展？**
+### Q: 文章列表为空，只显示「当前页面」？
 
-A: 修改代码后，在 `chrome://extensions/` 页面点击扩展卡片上的刷新按钮，然后重启 `feishu_server.py`。
+**A:** 可能原因：
+1. 当前页面不是知识库的根页面，侧边栏目录不可见 → 导航到知识库首页
+2. `lark-cli` 认证过期 → 重新执行 `lark-cli auth login`
+3. 文档权限不足 → 确认你有该知识库的阅读权限
 
-**Q: lark-cli 认证过期？**
+### Q: 在子页面只能看到当前页，看不到其他文章？
 
-A: 重新执行 `lark-cli auth login` 完成认证。
+**A:** 插件会自动通过缓存的根页面回溯获取完整目录。如果你之前没有在根页面使用过插件，请先导航到知识库首页打开一次插件，之后在子页面也能获取完整目录。
+
+### Q: 图片下载失败或 Markdown 中图片不显示？
+
+**A:** 图片下载依赖 `lark-cli docs +media-preview`，该接口对跨租户文档有限制。如果你访问的是他人创建的知识库，图片可能无法下载。此时 Markdown 中会保留原始图片 URL。
+
+### Q: 表格内容显示为乱码或 HTML 标签？
+
+**A:** 这是飞书富文本段的序列化格式。v5.3+ 版本已内置自动清洗逻辑，如果仍有残留，请升级到最新版本。
+
+### Q: 如何更新扩展？
+
+**A:**
+1. `git pull` 拉取最新代码
+2. 在 `chrome://extensions/` 点击扩展卡片的刷新图标
+3. 重启 `feishu_server.py`（Ctrl+C 然后重新运行）
+
+### Q: lark-cli 认证过期了怎么办？
+
+**A:**
+
+```bash
+lark-cli auth login
+# 按提示完成浏览器授权
+```
+
+认证后无需重启 Python 服务，下次请求会自动使用新凭证。
+
+---
+
+## 故障排查
+
+### 检查清单（按顺序）
+
+1. ✅ `python3 feishu_server.py` 是否在运行？终端有无报错？
+2. ✅ `curl http://127.0.0.1:8765/health` 是否返回 `{"status":"ok"}`？
+3. ✅ `lark-cli auth whoami` 是否正常显示用户信息？
+4. ✅ Chrome 扩展是否已加载且版本号正确（`chrome://extensions/`）？
+5. ✅ 当前页面 URL 是否包含 `feishu.cn/wiki/`？
+6. ✅ 你是否对该知识库有阅读权限？
+
+### 调试日志
+
+插件会在多个层级输出日志：
+
+- **Popup 弹窗**：打开 Chrome DevTools（右键弹窗 → 检查），查看 Console
+- **Content Script**：在飞书页面按 F12，Console 中过滤 `[FeishuCrawler]`
+- **Python 服务**：查看运行 `feishu_server.py` 的终端输出
+
+### 清除缓存
+
+如果目录发现异常，可以删除缓存文件后重试：
+
+```bash
+rm .space_cache.json
+# 重启 feishu_server.py
+```
+
+---
+
+## 开发调试
+
+### 本地开发
+
+```bash
+# 1. 启动 API 服务
+git clone https://github.com/kennyxiongxy/feishu-doc-download.git
+cd feishu-doc-download
+python3 feishu_server.py
+
+# 2. 加载扩展到 Chrome
+# chrome://extensions/ → 开发者模式 → 加载已解压的扩展程序 → 选择项目目录
+```
+
+### 版本历史
+
+| 版本 | 主要变更 |
+|------|----------|
+| v5.4 | 修复目录选择持久化（IndexedDB 权限分离） |
+| v5.3 | 批量提取优化、子文档递归展开、图片智能过滤 |
+| v5.0 | wiki API 优先、多文档空间支持（48 篇级别知识库） |
+| v4.x | Markdown 转换增强（表格、callout、电子表格） |
+| v3.x | lark-cli 集成、富文本段清洗 |
+| v2.x | File System Access API、图片下载 |
+| v1.x | 基础 DOM 提取、Turndown 转换 |
+
+### 技术栈
+
+- **Chrome Extension**: Manifest V3, File System Access API, IndexedDB, chrome.storage
+- **Python**: http.server (标准库), subprocess, threading
+- **飞书 API**: lark-cli（wiki +node-get, wiki +node-list, docs +fetch, docs +media-preview）
+- **前端**: Vanilla JS, CSS（无框架依赖）
+
+---
+
+## License
+
+MIT
