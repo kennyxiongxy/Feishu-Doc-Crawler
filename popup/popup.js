@@ -1,5 +1,5 @@
-// popup.js — 飞书文档爬取助手 v4.3
-// 增强调试：显示 token 信息，详细日志
+// popup.js — 飞书文档爬取助手 v5.4
+// v5.4: 修复目录持久化 — 分离恢复显示与重新授权
 
 const API_BASE = 'http://127.0.0.1:8765';
 
@@ -35,29 +35,14 @@ async function saveDirHandle(handle) {
 }
 
 async function loadDirHandle() {
+  // 仅从 IndexedDB 加载句柄，不请求权限（权限需要用户手势）
   try {
     const db = await openDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction('handles', 'readonly');
       const store = tx.objectStore('handles');
       const req = store.get('dirHandle');
-      req.onsuccess = () => {
-        const handle = req.result;
-        if (handle) {
-          // 验证权限
-          handle.queryPermission({ mode: 'readwrite' }).then(perm => {
-            if (perm === 'granted') {
-              resolve(handle);
-            } else {
-              handle.requestPermission({ mode: 'readwrite' }).then(newPerm => {
-                resolve(newPerm === 'granted' ? handle : null);
-              }).catch(() => resolve(null));
-            }
-          }).catch(() => resolve(null));
-        } else {
-          resolve(null);
-        }
-      };
+      req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => resolve(null);
     });
   } catch (e) {
@@ -65,6 +50,19 @@ async function loadDirHandle() {
   }
 }
 
+async function verifyOrRequestPermission(handle) {
+  // 在用户手势中调用：验证或请求目录权限
+  if (!handle) return null;
+  try {
+    const perm = await handle.queryPermission({ mode: 'readwrite' });
+    if (perm === 'granted') return handle;
+    const newPerm = await handle.requestPermission({ mode: 'readwrite' });
+    return newPerm === 'granted' ? handle : null;
+  } catch (e) {
+    console.log('[Perm] verifyOrRequestPermission failed:', e.message);
+    return null;
+  }
+}
 
 
 function abortTimeout(ms) {
@@ -96,6 +94,7 @@ let isCancelled = false;
 let crawlInProgress = false;
 let originalUrl = '';
 let serverAvailable = false;
+let needsReauth = false;  // true 表示有已保存的句柄但需要用户手势重新授权
 
 // DOM refs
 const $loading = document.getElementById('status-loading');
@@ -202,6 +201,22 @@ function getSelectedIndices() {
 }
 
 // ============================================================
+// 文件夹显示更新
+// ============================================================
+function updateFolderDisplay() {
+  if (folderName && dirHandle && !needsReauth) {
+    $folderPath.textContent = '📁 ' + folderName;
+    $folderPath.style.color = '#1f2329';
+  } else if (folderName && needsReauth) {
+    $folderPath.textContent = '⚠️ ' + folderName + '（点击重新授权）';
+    $folderPath.style.color = '#ff9500';
+  } else {
+    $folderPath.textContent = '未选择';
+    $folderPath.style.color = '#8f959e';
+  }
+}
+
+// ============================================================
 // 初始化
 // ============================================================
 async function init() {
@@ -211,6 +226,38 @@ async function init() {
   $serverStatus.innerHTML = '<span class="server-ok">● 正在连接 API...</span>';
   $articleList.innerHTML = '<div class="no-articles">正在获取文章列表...</div>';
   $debugInfo.textContent = '';
+
+  // 第一步：恢复文件夹名（从 chrome.storage.local）
+  try {
+    const storedF = await chrome.storage.local.get(['folderName']);
+    if (storedF.folderName) {
+      folderName = storedF.folderName;
+      console.log('[Popup] Restored folderName from storage:', folderName);
+    }
+  } catch (e) { console.log('[Popup] Load folderName failed:', e.message); }
+
+  // 第二步：尝试恢复目录句柄（仅加载，不请求权限）
+  try {
+    const savedHandle = await loadDirHandle();
+    if (savedHandle) {
+      // 静默检查权限状态
+      const perm = await savedHandle.queryPermission({ mode: 'readwrite' }).catch(() => 'denied');
+      if (perm === 'granted') {
+        dirHandle = savedHandle;
+        needsReauth = false;
+        console.log('[Popup] DirHandle restored with permission granted');
+      } else {
+        // 句柄有但权限不在 — 需要用户点击时重新授权
+        dirHandle = savedHandle;
+        needsReauth = true;
+        console.log('[Popup] DirHandle restored but needs re-auth (perm:', perm, ')');
+      }
+    } else {
+      console.log('[Popup] No saved DirHandle in IndexedDB');
+    }
+  } catch (e) { console.log('[Popup] Load dirHandle failed:', e.message); }
+
+  updateFolderDisplay();
   updateStartButton();
 
   try {
@@ -275,20 +322,6 @@ async function init() {
       articles = [{ title: pageTitle || '当前页面', token: extractTokenFromUrl(originalUrl), url: originalUrl }];
     }
 
-    // 恢复已保存的目录句柄
-    try {
-      const savedHandle = await loadDirHandle();
-      if (savedHandle) {
-        dirHandle = savedHandle;
-        const storedF = await chrome.storage.local.get(['folderName']);
-        if (storedF.folderName) {
-          folderName = storedF.folderName;
-          $folderPath.textContent = folderName;
-          $folderPath.style.color = '#1f2329';
-        }
-      }
-    } catch (e) { console.log('Load dirHandle failed:', e.message); }
-
     renderArticles();
 
     const uniqueTokens = new Set(articles.map(a => a.doc_token || a.token || '')).size;
@@ -327,23 +360,73 @@ function showError(msg) {
 
 function updateStartButton() {
   const sel = getSelectedIndices();
-  $btnStart.disabled = (sel.length === 0) || !folderName;
+  // 需要：至少选一篇文章 + 有文件夹名 + dirHandle 可用（不处于待授权状态）
+  const hasDir = dirHandle && !needsReauth && folderName;
+  $btnStart.disabled = (sel.length === 0) || !hasDir;
+  if (!hasDir && folderName && needsReauth) {
+    $btnStart.title = '请先点击"选择文件夹"重新授权';
+  } else {
+    $btnStart.title = '';
+  }
 }
 
 // ============================================================
 // 事件
 // ============================================================
+
+// 选择文件夹 — 优先尝试重新授权已保存的句柄
 document.getElementById('btn-folder').addEventListener('click', async () => {
   try {
+    // 如果有已保存的句柄但需要重新授权，先尝试授权
+    if (dirHandle && needsReauth) {
+      console.log('[Popup] Trying to re-auth existing handle...');
+      const verified = await verifyOrRequestPermission(dirHandle);
+      if (verified) {
+        dirHandle = verified;
+        needsReauth = false;
+        console.log('[Popup] Re-auth succeeded');
+        updateFolderDisplay();
+        updateStartButton();
+        return;
+      }
+      console.log('[Popup] Re-auth failed, will show picker');
+      dirHandle = null;
+      needsReauth = false;
+    }
+
+    // 打开新的目录选择器
     dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
     folderName = dirHandle.name;
-    $folderPath.textContent = folderName;
-    $folderPath.style.color = '#1f2329';
+    needsReauth = false;
+
+    // 持久化
     await chrome.storage.local.set({ folderName });
     await saveDirHandle(dirHandle);
+    console.log('[Popup] New dirHandle saved:', folderName);
+
+    updateFolderDisplay();
     updateStartButton();
-  } catch (err) { if (err.name !== 'AbortError') console.error(err); }
+  } catch (err) {
+    if (err.name !== 'AbortError') console.error('[Popup] Folder picker error:', err);
+    // 用户取消 — 如果之前有句柄但授权失败，保持 needsReauth 状态
+    if (dirHandle && needsReauth) {
+      updateFolderDisplay();
+      updateStartButton();
+    }
+  }
 });
+
+// 开始爬取前确保权限有效
+async function ensureDirPermission() {
+  if (!dirHandle) return false;
+  if (needsReauth) {
+    const verified = await verifyOrRequestPermission(dirHandle);
+    if (!verified) return false;
+    dirHandle = verified;
+    needsReauth = false;
+  }
+  return true;
+}
 
 document.getElementById('btn-select-all').addEventListener('click', () => {
   $articleList.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
@@ -359,6 +442,15 @@ $articleList.addEventListener('change', e => { if (e.target.type === 'checkbox')
 // 爬取
 // ============================================================
 $btnStart.addEventListener('click', async () => {
+  // 点击时重新验证权限
+  if (!(await ensureDirPermission())) {
+    alert('目录权限已过期，请重新选择保存文件夹');
+    dirHandle = null;
+    folderName = '';
+    updateFolderDisplay();
+    updateStartButton();
+    return;
+  }
   if (!dirHandle || !folderName) return alert('请先选择保存文件夹');
   if (crawlInProgress) return;
 
