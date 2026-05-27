@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "飞书文档爬取助手",
+  "version": "5.3.0",
+  "description": "爬取飞书文档内容并保存为本地 Markdown 文件 v4.2 (API模式 + 表格支持)",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "cookies",
+    "downloads"
+  ],
+  "host_permissions": [
+    "*://*.feishu.cn/*",
+    "*://*.feishucdn.com/*",
+    "*://*.bytedance.com/*",
+    "*://*.bytedance.net/*",
+    "*://*.byteimg.com/*",
+    "*://*.toutiaoimg.com/*",
+    "*://*.feishu-staging.cn/*",
+    "*://*.feishupkg.com/*",
+    "http://127.0.0.1:8765/*",
+    "http://localhost:8765/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "飞书文档爬取助手"
+  },
+  "background": {
+    "service_worker": "background/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.feishu.cn/*"
+      ],
+      "js": [
+        "lib/turndown.js",
+        "content/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

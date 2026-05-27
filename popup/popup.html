@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>飞书文档爬取助手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="status-loading" class="status">
+    <div class="spinner"></div>
+    <p id="loading-text">正在分析页面结构...</p>
+  </div>
+
+  <div id="status-ready" class="status hidden">
+    <div class="header">
+      <h1>飞书文档爬取助手 <span class="version">v4.0</span></h1>
+      <div id="server-status" class="server-status"></div>
+    </div>
+
+    <div id="page-info" class="section">
+      <div class="label">页面标题</div>
+      <div id="page-title" class="value"></div>
+    </div>
+
+    <div class="section">
+      <div class="label">文章列表 (<span id="article-count">0</span>)</div>
+      <div class="article-list" id="article-list">
+      </div>
+      <div class="select-actions">
+        <button id="btn-select-all" class="btn-sm">全选</button>
+        <button id="btn-deselect-all" class="btn-sm">取消全选</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="label">保存文件夹</div>
+      <div class="folder-row">
+        <span id="folder-path" class="value">未选择</span>
+        <button id="btn-folder" class="btn-primary">选择文件夹</button>
+      </div>
+    </div>
+
+    <div id="debug-info" class="debug-info"></div>
+    <div class="section server-setup">
+      <div class="label">💡 首次使用提示</div>
+      <div class="hint">
+        在终端运行以下命令启动 API 服务：
+        <code>cd 项目目录 && python3 feishu_server.py</code>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="btn-start" class="btn-start" disabled>开始爬取</button>
+    </div>
+  </div>
+
+  <div id="status-crawling" class="status hidden">
+    <div class="header">
+      <h1>正在爬取...</h1>
+    </div>
+    <div class="progress-bar-container">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    <p id="crawl-current" class="crawl-info"></p>
+    <p id="crawl-stats" class="crawl-stats"></p>
+    <div class="actions">
+      <button id="btn-cancel" class="btn-cancel">取消</button>
+    </div>
+  </div>
+
+  <div id="status-complete" class="status hidden">
+    <div class="header">
+      <h1>爬取完成</h1>
+    </div>
+    <p id="complete-msg" class="complete-msg"></p>
+    <div class="actions">
+      <button id="btn-reset" class="btn-primary">返回</button>
+    </div>
+  </div>
+
+  <div id="status-error" class="status hidden">
+    <div class="header">
+      <h1>出错</h1>
+    </div>
+    <p id="error-msg" class="error-msg"></p>
+    <div class="actions">
+      <button id="btn-retry" class="btn-primary">重试</button>
+      <button id="btn-error-back" class="btn-primary">返回</button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

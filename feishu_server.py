@@ -1,0 +1,809 @@
+#!/usr/bin/env python3
+"""
+飞书文档爬取 - 本地 API 服务
+通过 lark-cli 获取飞书文档的完整 Markdown 内容。
+
+启动方式：
+    python3 feishu_server.py
+
+    或指定端口：
+    python3 feishu_server.py --port 8765
+"""
+
+import json
+import re
+import ast
+import subprocess
+import sys
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
+import argparse
+
+
+def cell_to_text(cell):
+    """将单元格值转为纯文本，处理飞书富文本段格式"""
+    if cell is None:
+        return ''
+    if isinstance(cell, str):
+        s = cell.strip()
+        if s.startswith('[{') and s.endswith('}]'):
+            try:
+                segments = ast.literal_eval(s)
+                if isinstance(segments, list):
+                    return ''.join(seg.get('text', '') for seg in segments if isinstance(seg, dict))
+            except (ValueError, SyntaxError):
+                pass
+        return cell
+    if isinstance(cell, list):
+        return ''.join(seg.get('text', '') if isinstance(seg, dict) else str(seg) for seg in cell)
+    return str(cell)
+
+
+def clean_rich_text_in_markdown(content):
+    """将 Markdown 表格中嵌入的飞书富文本段（Python 对象字符串）转为纯文本"""
+    def find_rich_text_segments(line):
+        """Find all [{...}] patterns in a line, handling nested brackets"""
+        results = []
+        i = 0
+        while i < len(line):
+            if line[i:i+2] == '[{':
+                depth = 1
+                j = i + 2
+                while j < len(line) and depth > 0:
+                    if line[j] == '[':
+                        depth += 1
+                    elif line[j] == ']':
+                        depth -= 1
+                    j += 1
+                if depth == 0:
+                    results.append((i, j, line[i:j]))
+                i = j
+            else:
+                i += 1
+        return results
+
+    lines = content.split('\n')
+    result_lines = []
+    for line in lines:
+        if line.strip().startswith('|') and '[{' in line:
+            segments = find_rich_text_segments(line)
+            if segments:
+                for start, end, seg_text in reversed(segments):
+                    try:
+                        parsed = ast.literal_eval(seg_text)
+                        if isinstance(parsed, list):
+                            plain_text = ''.join(seg.get('text', '') for seg in parsed if isinstance(seg, dict))
+                            line = line[:start] + plain_text + line[end:]
+                    except (ValueError, SyntaxError):
+                        pass
+        result_lines.append(line)
+    return '\n'.join(result_lines)
+
+
+LARK_CLI = '/opt/homebrew/bin/lark-cli'
+
+# 空间 -> 根页面 token 缓存（持久化到文件）
+import threading
+import os as _os
+
+_CACHE_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.space_cache.json')
+_space_root_cache = {}
+_cache_lock = threading.Lock()
+
+
+def _load_cache():
+    """从文件加载缓存的映射"""
+    global _space_root_cache
+    try:
+        if _os.path.exists(_CACHE_FILE):
+            with open(_CACHE_FILE, 'r') as f:
+                _space_root_cache = json.load(f)
+            print(f'[Server] Loaded {len(_space_root_cache)} cached space mappings')
+    except Exception:
+        pass
+
+
+def _save_cache():
+    """保存映射到文件"""
+    try:
+        with open(_CACHE_FILE, 'w') as f:
+            json.dump(_space_root_cache, f)
+    except Exception:
+        pass
+
+
+_load_cache()
+
+
+def get_space_key(url):
+    """从 URL 提取空间 key（子域名）"""
+    parsed = urlparse(url)
+    host = parsed.hostname or ''
+    parts = host.split('.')
+    if len(parts) >= 3 and parts[1] == 'feishu':
+        return parts[0]
+    return host
+
+
+def cache_root_for_space(space_key, root_token, sub_doc_count=0):
+    """缓存空间的根页面 token（保留子文档最多的那个）"""
+    with _cache_lock:
+        # 用复合 key 存储: {token: count}
+        cache_key = space_key + '__count'
+        current_best = _space_root_cache.get(space_key)
+        current_count = _space_root_cache.get(cache_key, 0)
+        
+        if sub_doc_count > current_count:
+            _space_root_cache[space_key] = root_token
+            _space_root_cache[cache_key] = sub_doc_count
+            _save_cache()
+            print(f'[Server] Cached root for {space_key}: {root_token[:16]}... ({sub_doc_count} sub-docs)')
+
+
+def get_cached_root(space_key):
+    """获取缓存的空间根 token"""
+    with _cache_lock:
+        return _space_root_cache.get(space_key)
+
+
+
+PORT = 8765
+
+
+def extract_token_from_url(url):
+    """从飞书文档 URL 中提取 doc token"""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip('/')
+    parts = path.split('/')
+
+    for i, part in enumerate(parts):
+        if part in ('wiki', 'docx', 'docs'):
+            if i + 1 < len(parts):
+                token = parts[i + 1]
+                if '?' in token:
+                    token = token.split('?')[0]
+                return token
+
+    last = parts[-1] if parts else ''
+    if len(last) >= 20:
+        return last
+
+    return None
+
+
+def run_lark_cli(token):
+    """调用 lark-cli 获取文档原始 JSON"""
+    env = os.environ.copy()
+    env['LARK_CLI_NO_PROXY'] = '1'
+
+    cmd = [
+        LARK_CLI, 'docs', '+fetch',
+        '--api-version', 'v2',
+        '--doc-format', 'markdown',
+        '--doc', token,
+        '--as', 'user',
+        '--format', 'json'
+    ]
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env
+    )
+
+    if result.returncode != 0:
+        return {'error': f'lark-cli failed: {result.stderr}'}
+
+    try:
+        data = json.loads(result.stdout)
+        if not data.get('ok'):
+            return {'error': 'API returned not ok'}
+        return data
+    except json.JSONDecodeError as e:
+        return {'error': f'JSON parse error: {e}'}
+
+
+def fetch_doc_content(token):
+    """通过 lark-cli 获取文档的 Markdown 内容"""
+    data = run_lark_cli(token)
+    if 'error' in data:
+        return data
+
+    doc = data.get('data', {}).get('document', {})
+    content = doc.get('content', '')
+    title = extract_title_from_markdown(content)
+
+    # 先从原始内容中提取 cite 来获得子文档列表
+    sub_docs = parse_cite_elements(content)
+
+    # 提取图片 URL 列表
+    images = extract_images(content)
+
+    # 清理特殊标签
+    content = clean_markdown(content)
+
+    return {
+        'title': title,
+        'content': content,
+        'images': images,
+        'document_id': doc.get('document_id', ''),
+        'sub_docs': sub_docs,
+    }
+
+
+
+def run_lark_cli_raw(cmd, timeout=30):
+    """Run a lark-cli command and return parsed JSON"""
+    env = os.environ.copy()
+    env['LARK_CLI_NO_PROXY'] = '1'
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    if result.returncode != 0:
+        return {'error': f'lark-cli failed: {result.stderr}'}
+    
+    # Parse JSON from output (may have leading text like "Found X node(s)")
+    lines = result.stdout.split('\n')
+    json_start = None
+    for i, l in enumerate(lines):
+        if l.strip().startswith('{'):
+            json_start = i
+            break
+    
+    if json_start is None:
+        return {'error': 'No JSON found in output'}
+    
+    try:
+        json_str = '\n'.join(lines[json_start:])
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        return {'error': f'JSON parse error: {e}'}
+
+
+def run_wiki_node_get(token_or_url):
+    """Get wiki node info using lark-cli wiki +node-get"""
+    cmd = [
+        LARK_CLI, 'wiki', '+node-get',
+        '--token', token_or_url,
+        '--as', 'user',
+        '--format', 'json'
+    ]
+    return run_lark_cli_raw(cmd)
+
+
+def run_wiki_node_list(space_id, parent_token):
+    """List wiki nodes under a parent node"""
+    cmd = [
+        LARK_CLI, 'wiki', '+node-list',
+        '--space-id', space_id,
+        '--parent-node-token', parent_token,
+        '--as', 'user',
+        '--format', 'json'
+    ]
+    return run_lark_cli_raw(cmd, timeout=15)
+
+
+def discover_via_wiki_api(token_or_url):
+    """
+    Use wiki API to discover sub-documents.
+    Returns a list of articles from the wiki node tree.
+    Falls back gracefully if the wiki API is unavailable.
+    """
+    token = extract_token_from_url(token_or_url) if '/' in str(token_or_url) else token_or_url
+    if not token:
+        return {'error': 'Cannot extract token'}
+    
+    # Step 1: Get node info to check has_child and get space_id
+    print(f'[Server] Wiki API: getting node info for {token[:16]}...')
+    node_data = run_wiki_node_get(token_or_url)
+    
+    if 'error' in node_data:
+        print(f'[Server] Wiki node-get failed: {node_data["error"][:100]}')
+        return node_data
+    
+    if not node_data.get('ok'):
+        return {'error': 'Wiki API returned not ok'}
+    
+    node = node_data.get('data', {})
+    has_child = node.get('has_child', False)
+    space_id = node.get('space_id', '')
+    title = node.get('title', '')
+    
+    if not has_child:
+        return {'title': title, 'articles': [], 'source': 'wiki_api'}
+    
+    if not space_id:
+        return {'error': 'No space_id found'}
+    
+    # Step 2: List all children
+    print(f'[Server] Wiki API: listing children of {token[:16]} (space={space_id[:16]}...)')
+    list_data = run_wiki_node_list(space_id, token)
+    
+    if 'error' in list_data:
+        print(f'[Server] Wiki node-list failed: {list_data["error"][:100]}')
+        return list_data
+    
+    if not list_data.get('ok'):
+        return {'error': 'Wiki node-list API returned not ok'}
+    
+    nodes = list_data.get('data', {}).get('nodes', [])
+    
+    articles = []
+    for n in nodes:
+        node_token = n.get('node_token', '')
+        if not node_token:
+            continue
+        articles.append({
+            'title': n.get('title', ''),
+            'doc_token': node_token,
+            'url': f'https://internal.feishu.cn/wiki/{node_token}',
+            'has_child': n.get('has_child', False),
+            'obj_token': n.get('obj_token', ''),
+        })
+    
+    print(f'[Server] Wiki API: found {len(articles)} child nodes')
+    return {
+        'title': title,
+        'space_id': space_id,
+        'page_token': token,
+        'articles': articles,
+        'source': 'wiki_api'
+    }
+
+
+def discover_sub_documents(url_or_token, auto_find_root=False):
+    """
+    发现文档下的子文档列表。
+    优先使用 wiki API 获取完整节点树，回退到 <cite> 元素解析。
+    
+    当 auto_find_root=True 且当前页无子文档时，自动尝试用缓存的空间根页面。
+    """
+    token = extract_token_from_url(url_or_token) if '/' in str(url_or_token) else url_or_token
+    if not token:
+        return {'error': 'Cannot extract token'}
+    
+    # --- Strategy 1: Wiki API (most complete) ---
+    wiki_result = discover_via_wiki_api(url_or_token)
+    if 'error' not in wiki_result and wiki_result.get('articles'):
+        space_key = get_space_key(url_or_token) if '/' in str(url_or_token) else ''
+        if space_key:
+            cache_root_for_space(space_key, token, len(wiki_result['articles']))
+        return {
+            'title': wiki_result.get('title', ''),
+            'document_id': '',
+            'page_token': token,
+            'articles': wiki_result['articles'],
+        }
+    
+    # --- Strategy 2: Parse <cite> elements from document content ---
+    data = run_lark_cli(token)
+    if 'error' in data:
+        return data
+
+    doc = data.get('data', {}).get('document', {})
+    raw_content = doc.get('content', '')
+    title = extract_title_from_markdown(raw_content)
+
+    sub_docs = parse_cite_elements(raw_content)
+    
+    space_key = get_space_key(url_or_token) if '/' in str(url_or_token) else ''
+    
+    if sub_docs:
+        # 成功发现子文档 -> 缓存根 token
+        if space_key:
+            cache_root_for_space(space_key, token, len(sub_docs))
+    
+    # 自动根页面发现：如果缓存中有根token且不同于当前token，
+    # 优先返回根页面的完整目录（这是用户最想要的）
+    if auto_find_root and space_key:
+        cached_root = get_cached_root(space_key)
+        if cached_root and cached_root != token:
+            print(f'[Server] Auto-retrying with cached root: {cached_root}')
+            root_data = run_lark_cli(cached_root)
+            if 'error' not in root_data:
+                root_doc = root_data.get('data', {}).get('document', {})
+                root_content = root_doc.get('content', '')
+                root_sub_docs = parse_cite_elements(root_content)
+                if root_sub_docs and len(root_sub_docs) > len(sub_docs):
+                    return {
+                        'title': extract_title_from_markdown(root_content),
+                        'document_id': root_doc.get('document_id', ''),
+                        'page_token': cached_root,
+                        'articles': root_sub_docs,
+                    }
+
+    return {
+        'title': title,
+        'document_id': doc.get('document_id', ''),
+        'page_token': token,
+        'articles': sub_docs,
+    }
+
+
+def parse_cite_elements(content):
+    """
+    从原始 Markdown 中解析 <cite> 元素，提取子文档列表。
+    <cite doc-id="XXX" file-type="wiki" title="标题" type="doc"></cite>
+    """
+    articles = []
+    seen_ids = set()
+
+    pattern = r'<cite\s+([^>]*?)></cite>'
+    attr_pattern = r'(\S+)="([^"]*)"'
+
+    for match in re.finditer(pattern, content, flags=re.DOTALL):
+        attrs_str = match.group(1)
+        attrs = dict(re.findall(attr_pattern, attrs_str))
+
+        title = attrs.get('title', '')
+        doc_id = attrs.get('doc-id', '')
+
+        if not title or not doc_id:
+            continue
+        if doc_id in seen_ids:
+            continue
+        seen_ids.add(doc_id)
+
+        articles.append({
+            'title': title,
+            'doc_token': doc_id,
+            'url': f'https://internal.feishu.cn/wiki/{doc_id}',
+        })
+    return articles
+
+
+def extract_title_from_markdown(content):
+    """从 Markdown 内容中提取第一个 H1 标题"""
+    match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return '未命名文档'
+
+
+def extract_images(content):
+    """从 Markdown 内容中提取图片 URL"""
+    images = []
+    pattern = r'!\[([^\]]*)\]\((https?://[^\)]+)\)'
+    for match in re.finditer(pattern, content):
+        alt = match.group(1)
+        url = match.group(2)
+        url_lower = url.lower()
+        if any(skip in url_lower for skip in ['avatar', 'profile', '/icon', 'logo', 'emoj', 'badge', 'sticker', 'sprite', 'favicon']):
+            continue
+        ext = 'png'
+        url_path = urlparse(url).path
+        if '.' in url_path:
+            possible_ext = url_path.rsplit('.', 1)[1].split('?')[0]
+            if possible_ext in ('png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'):
+                ext = possible_ext
+
+        images.append({
+            'url': url,
+            'file_token': urlparse(url).path.rsplit('/', 1)[-1].split('?')[0],
+            'alt': alt,
+            'ext': ext
+        })
+    return images
+
+
+
+def fetch_sheet_content(spreadsheet_token, sheet_id):
+    """读取飞书电子表格内容并转为 Markdown 表格"""
+    env = os.environ.copy()
+    env['LARK_CLI_NO_PROXY'] = '1'
+    
+    cmd = [
+        LARK_CLI, 'sheets', '+read',
+        '--spreadsheet-token', spreadsheet_token,
+        '--sheet-id', sheet_id,
+        '--as', 'user',
+        '--value-render-option', 'FormattedValue'
+    ]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env=env)
+        if result.returncode != 0:
+            return f'*(表格读取失败)*'
+        
+        data = json.loads(result.stdout)
+        if not data.get('ok'):
+            return f'*(表格读取失败)*'
+        
+        values = data.get('data', {}).get('valueRange', {}).get('values', [])
+        if not values or len(values) < 2:
+            return f'*(空表格)*'
+        
+        # 转换为 Markdown 表格
+        lines = []
+        # Header row
+        headers = [cell_to_text(cell) for cell in values[0]]
+        lines.append('| ' + ' | '.join(headers) + ' |')
+        # Separator
+        lines.append('|' + '|'.join([' --- ' for _ in headers]) + '|')
+        # Data rows
+        for row in values[1:]:
+            cells = []
+            for cell in row:
+                text = cell_to_text(cell)
+                text = text.replace('\n', ' ').replace('|', '\\|')
+                cells.append(text)
+            # Pad to match header count
+            while len(cells) < len(headers):
+                cells.append('')
+            lines.append('| ' + ' | '.join(cells[:len(headers)]) + ' |')
+        
+        return '\n\n' + '\n'.join(lines) + '\n\n'
+    except Exception as e:
+        return f'*(表格读取异常: {str(e)[:50]})*'
+
+
+def replace_sheets_with_content(content):
+    """将 <sheet> 标签替换为实际表格内容"""
+    def replace_sheet(match):
+        attrs_str = match.group(1)
+        attrs = dict(re.findall(r'(\S+)="([^"]*)"', attrs_str))
+        sheet_id = attrs.get('sheet-id', '')
+        token = attrs.get('token', '')
+        
+        if not sheet_id or not token:
+            return '\n\n*(内嵌电子表格 - 无法识别)*\n\n'
+        
+        print(f'[Server] Fetching sheet: {sheet_id} from {token[:20]}...')
+        table_md = fetch_sheet_content(token, sheet_id)
+        return table_md
+    
+    content = re.sub(
+        r'<sheet\s+([^>]*?)></sheet>',
+        replace_sheet,
+        content,
+        flags=re.DOTALL
+    )
+    return content
+
+
+def clean_markdown(content):
+    """清理飞书 API 返回的 Markdown 中的特殊标签"""
+    # 0. 先处理表格单元格中的富文本段（Python 对象字符串 -> 纯文本）
+    content = clean_rich_text_in_markdown(content)
+
+    # 1. <callout emoji="X">...</callout> -> > **X** ...
+    def replace_callout(match):
+        emoji = match.group(1)
+        inner = match.group(2)
+        lines = inner.strip().split('\n')
+        result = f'> **{emoji}**\n'
+        for line in lines:
+            result += f'> {line.strip()}\n'
+        return result
+
+    content = re.sub(
+        r'<callout\s+emoji="([^"]*)">(.*?)</callout>',
+        replace_callout,
+        content,
+        flags=re.DOTALL
+    )
+
+    # 2. 移除 <cite> 标签
+    content = re.sub(r'<cite\s+[^>]*?></cite>', '', content)
+
+    # 3. <sheet> -> 标记
+    # 用实际表格内容替换 sheet 占位符
+    content = replace_sheets_with_content(content)
+
+    # 4. 清理多余空行
+    content = re.sub(r'\n{4,}', '\n\n\n', content)
+
+    # 5. 清理目录下空行
+    content = re.sub(r'## 目录\n\n(?:-\s*\n)*', '## 目录\n\n', content)
+
+    return content.strip()
+
+
+class FeishuHandler(BaseHTTPRequestHandler):
+
+    def _set_headers(self, status=200, content_type='application/json'):
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def _send_json(self, data, status=200):
+        self._set_headers(status)
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+
+    def _read_body(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length > 0:
+            return json.loads(self.rfile.read(content_length))
+        return {}
+
+    def do_OPTIONS(self):
+        self._set_headers(204)
+
+    def do_GET(self):
+        if self.path == '/health':
+            self._send_json({'status': 'ok', 'service': 'feishu-crawler-server'})
+        elif self.path.startswith('/ping'):
+            try:
+                result = subprocess.run([LARK_CLI, '--version'], capture_output=True, text=True, timeout=5)
+                self._send_json({'status': 'ok', 'lark_cli': result.stdout.strip()})
+            except Exception as e:
+                self._send_json({'status': 'error', 'error': str(e)}, 500)
+        else:
+            self._send_json({'error': 'Not found'}, 404)
+
+    def do_POST(self):
+        try:
+            data = self._read_body()
+        except json.JSONDecodeError:
+            self._send_json({'error': 'Invalid JSON'}, 400)
+            return
+
+        if self.path == '/discover':
+            self.handle_discover(data)
+        elif self.path == '/extract':
+            self.handle_extract(data)
+        elif self.path == '/extract-batch':
+            self.handle_extract_batch(data)
+        elif self.path == '/read-file':
+            self.handle_read_file(data)
+        elif self.path == '/download-image':
+            self.handle_download_image(data)
+        else:
+            self._send_json({'error': 'Not found'}, 404)
+
+    def handle_discover(self, data):
+        url = data.get('url', '')
+        token = data.get('token', '')
+
+        target = url or token
+        if not target:
+            self._send_json({'error': 'No URL or token provided'}, 400)
+            return
+
+        print(f'[Server] Discovering sub-docs from: {target}')
+        result = discover_sub_documents(target, auto_find_root=True)
+
+        if 'error' in result:
+            self._send_json(result, 500)
+        else:
+            self._send_json(result)
+
+    def handle_extract(self, data):
+        url = data.get('url', '')
+        token = data.get('token', '')
+
+        if not token and url:
+            token = extract_token_from_url(url)
+
+        if not token:
+            self._send_json({'error': 'Cannot extract token from URL'}, 400)
+            return
+
+        print(f'[Server] Extracting doc: {token}')
+        result = fetch_doc_content(token)
+
+        if 'error' in result:
+            self._send_json(result, 500)
+        else:
+            result['token'] = token
+            self._send_json(result)
+
+    def handle_extract_batch(self, data):
+        urls = data.get('urls', [])
+        tokens = data.get('tokens', [])
+
+        items = tokens if tokens else urls
+        if not items:
+            self._send_json({'error': 'No URLs or tokens provided'}, 400)
+            return
+
+        results = []
+        for item in items:
+            token = extract_token_from_url(item) if '/' in item else item
+            if not token:
+                results.append({'item': item, 'error': 'Cannot extract token'})
+                continue
+
+            print(f'[Server] Batch extracting: {token}')
+            result = fetch_doc_content(token)
+            result['token'] = token
+            results.append(result)
+
+        self._send_json({'results': results})
+
+
+    def handle_download_image(self, data):
+        file_token = data.get('file_token', '')
+        if not file_token:
+            self._send_json({'error': 'No file_token'}, 400)
+            return
+        import tempfile, base64
+        tmp_dir = tempfile.mkdtemp(prefix='feishu_img_')
+        tmp_name = file_token[:16] + '.png'
+        env = os.environ.copy()
+        env['LARK_CLI_NO_PROXY'] = '1'
+        cmd = [LARK_CLI, 'docs', '+media-preview', '--token', file_token, '--output', tmp_name, '--overwrite', '--as', 'user']
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env, cwd=tmp_dir)
+            # Parse multi-line JSON from stdout
+            output = result.stdout + result.stderr
+            json_str = ''
+            in_json = False
+            depth = 0
+            for ch in output:
+                if ch == '{':
+                    in_json = True
+                    depth += 1
+                    json_str += ch
+                elif ch == '}' and in_json:
+                    depth -= 1
+                    json_str += ch
+                    if depth == 0:
+                        break
+                elif in_json:
+                    json_str += ch
+            
+            if json_str:
+                j = json.loads(json_str)
+                if j.get('ok'):
+                    sp = j.get('data', {}).get('saved_path', '')
+                    if sp and os.path.exists(sp) and os.path.getsize(sp) > 100:
+                        with open(sp, 'rb') as f:
+                            img_data = base64.b64encode(f.read()).decode('ascii')
+                        self._send_json({'ok': True, 'data': img_data, 'size': os.path.getsize(sp)})
+                        return
+            self._send_json({'error': 'Preview failed'}, 500)
+        except Exception as e:
+            self._send_json({'error': str(e)[:200]}, 500)
+
+    def handle_read_file(self, data):
+        """读取本地文件并返回 base64 编码内容"""
+        import base64
+        file_path = data.get('path', '')
+        if not file_path or not os.path.exists(file_path):
+            self._send_json({'error': 'File not found: ' + file_path}, 400)
+            return
+        try:
+            file_size = os.path.getsize(file_path)
+            with open(file_path, 'rb') as f:
+                content = base64.b64encode(f.read()).decode('ascii')
+            os.unlink(file_path)  # 清理临时文件
+            self._send_json({'ok': True, 'data': content, 'size': file_size})
+        except Exception as e:
+            self._send_json({'error': f'Read error: {str(e)[:200]}'}, 500)
+
+    def log_message(self, format, *args):
+        print(f'[Server] {args[0]}')
+
+
+def main():
+    global PORT
+
+    parser = argparse.ArgumentParser(description='飞书文档爬取本地 API 服务')
+    parser.add_argument('--port', type=int, default=PORT, help=f'监听端口 (默认: {PORT})')
+    args = parser.parse_args()
+    PORT = args.port
+
+    server = HTTPServer(('127.0.0.1', PORT), FeishuHandler)
+    print(f'🚀 飞书文档爬取 API 服务已启动')
+    print(f'   地址: http://127.0.0.1:{PORT}')
+    print(f'   /discover - 发现子文档列表')
+    print(f'   /extract  - 提取单个文档内容')
+    print(f'   健康检查: http://127.0.0.1:{PORT}/health')
+    print(f'   Ctrl+C 停止服务')
+    print()
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print('\n服务已停止')
+        server.shutdown()
+
+
+if __name__ == '__main__':
+    main()
