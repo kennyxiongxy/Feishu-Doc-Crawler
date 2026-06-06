@@ -105,18 +105,18 @@ async function discoverChildrenOfContract(state, parentIdx, discoverApi) {
     const result = await discoverApi(parentIdx);
     if (result && result.error) {
       state.childrenFailed.add(parentIdx);
-      return { ok: false, reason: 'api-error', error: result.error };
+      return { ok: false, reason: 'api-error', error: result.error, response: result };
     }
     const children = (result && result.articles) || [];
     if (children.length === 0) {
       state.childrenLoaded.add(parentIdx);
-      return { ok: true, count: 0 };
+      return { ok: true, count: 0, response: result };
     }
     state.childrenLoaded.add(parentIdx);
-    return { ok: true, count: children.length };
+    return { ok: true, count: children.length, response: result };
   } catch (e) {
     state.childrenFailed.add(parentIdx);
-    return { ok: false, reason: 'network-error', error: e.message };
+    return { ok: false, reason: 'network-error', error: e.message, response: null };
   } finally {
     state.loadingParents.delete(parentIdx);
   }
@@ -216,4 +216,45 @@ test('Bug #2: classic v5.10 bug — error as { articles: undefined } was treated
   const r = await discoverChildrenOfContract(state, 0, async () => ({ error: 'permission denied' }));
   assert.equal(r.ok, false);
   assert.equal(state.childrenLoaded.has(0), false, 'regression: must not silently load');
+});
+
+// ============================================================
+// v5.10.1 regression: stored path from v5.10.0 might be the bad
+// example path. New code must re-validate it on every call.
+// ============================================================
+function isValidStoredPath(p) {
+  if (!p) return false;
+  return !/yourname|<.*?>/.test(p);
+}
+
+test('v5.10.1: stored path /Users/yourname/... from v5.10.0 is rejected on read', () => {
+  assert.equal(isValidStoredPath('/Users/yourname/Documents/feishu-crawler'), false);
+  assert.equal(isValidStoredPath('/Users/<你的用户名>/Documents/feishu-crawler'), false);
+  assert.equal(isValidStoredPath('/Users/alice/Documents/feishu-crawler'), true);
+  assert.equal(isValidStoredPath(''), false);
+  assert.equal(isValidStoredPath(null), false);
+});
+
+// ============================================================
+// v5.10.1 contract: discoverChildrenOf now also reports back the
+// raw response so the UI can show debug info on failure.
+// ============================================================
+test('v5.10.1: api-error result includes the full response for debug display', async () => {
+  const state = makeTreeState();
+  const errResp = { error: 'No space_id found', source: 'wiki_api' };
+  const r = await discoverChildrenOfContract(state, 0, async () => errResp);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'api-error');
+  // The contract change adds the response back to the result so the UI can render it
+  assert.ok(r.response !== undefined, 'response should be attached to result');
+  assert.deepEqual(r.response, errResp);
+});
+
+test('v5.10.1: empty articles result is marked as count=0 (not error)', async () => {
+  const state = makeTreeState();
+  const r = await discoverChildrenOfContract(state, 0, async () => ({ articles: [], title: 'foo' }));
+  assert.equal(r.ok, true);
+  assert.equal(r.count, 0);
+  // The click handler can use this to show "没有子文档"
+  assert.ok(r.response !== undefined);
 });

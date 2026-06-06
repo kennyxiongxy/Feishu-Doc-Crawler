@@ -322,27 +322,44 @@ async function discoverChildrenOf(parentIdx) {
   loadingParents.add(parentIdx);
   childrenFailed.delete(parentIdx);
   renderArticles();
+  const t0 = Date.now();
+  const logLine = msg => appendTreeDebug(`[${Date.now() - t0}ms] ${msg}`);
+  logLine(`discoverChildrenOf(${parentIdx}) title="${(parent.title || '').slice(0, 30)}" token=${(token || '').slice(0, 16)}`);
   try {
     const result = await callApi('/discover', { token });
+    logLine(`API response keys=${result ? Object.keys(result).join(',') : 'null'}` +
+            (result && result.articles ? ` count=${result.articles.length}` : '') +
+            (result && result.error ? ` error="${result.error}"` : ''));
     if (result && result.error) {
       childrenFailed.add(parentIdx);
-      return { ok: false, reason: 'api-error', error: result.error };
+      return { ok: false, reason: 'api-error', error: result.error, response: result };
     }
     const children = (result && result.articles) || [];
     if (children.length === 0) {
       childrenLoaded.add(parentIdx);
-      return { ok: true, count: 0 };
+      return { ok: true, count: 0, response: result };
     }
     articles = insertChildrenAfter(articles, parentIdx, children);
     childrenLoaded.add(parentIdx);
-    return { ok: true, count: children.length };
+    return { ok: true, count: children.length, response: result };
   } catch (e) {
+    logLine(`EXCEPTION: ${e.message}`);
     childrenFailed.add(parentIdx);
     return { ok: false, reason: 'network-error', error: e.message || String(e) };
   } finally {
     loadingParents.delete(parentIdx);
     renderArticles();
   }
+}
+
+function appendTreeDebug(msg) {
+  console.log('[Tree v5.10.1]', msg);
+  const $log = document.getElementById('tree-debug-log');
+  if (!$log) return;
+  const $wrap = document.getElementById('tree-debug');
+  if ($wrap) $wrap.classList.remove('hidden');
+  $log.textContent += msg + '\n';
+  $log.scrollTop = $log.scrollHeight;
 }
 
 async function discoverAllUnloaded() {
@@ -599,12 +616,22 @@ document.getElementById('btn-folder').addEventListener('click', async () => {
 // 打开保存文件夹（v5.10）
 // 首次需要用户输入完整路径（File System Access API 不暴露路径给 JS）
 // ============================================================
-async function openSavedFolder() {
+async function openSavedFolder(forcePrompt = false) {
   let path = null;
-  try {
-    const stored = await chrome.storage.local.get(['lastFolderPath']);
-    path = (stored.lastFolderPath || '').trim();
-  } catch (e) { /* fall through to prompt */ }
+  if (!forcePrompt) {
+    try {
+      const stored = await chrome.storage.local.get(['lastFolderPath']);
+      path = (stored.lastFolderPath || '').trim();
+    } catch (e) { /* fall through to prompt */ }
+  }
+
+  // 任何时候检测到占位符,一律视为无效,清掉重新提示 (修复 v5.10.0 残留坏路径)
+  const hasPlaceholder = p => /yourname|<.*?>/.test(p || '');
+  if (path && hasPlaceholder(path)) {
+    console.warn('[OpenFolder] Stored path contains placeholder, clearing:', path);
+    path = '';
+    try { await chrome.storage.local.remove(['lastFolderPath']); } catch (e) {}
+  }
 
   if (!path) {
     const example = navigator.platform.toLowerCase().includes('mac')
@@ -615,17 +642,14 @@ async function openSavedFolder() {
     const input = window.prompt(
       '请输入保存文件夹的完整路径（用于一键打开）：\n\n' +
       `示例：${example}\n\n` +
-      '提示：路径可在 Finder/文件管理器中右键文件夹选择"显示简介"获取。',
+      '提示：路径可在 Finder/文件管理器中右键文件夹选择"显示简介"获取。\n' +
+      '输入空值取消。',
       ''
     );
-    if (input === null) return;  // user cancelled
+    if (input === null || input === '') return;  // user cancelled or empty
     path = input.trim();
-    if (!path) {
-      alert('路径不能为空。');
-      return;
-    }
-    if (/yourname|<.*?>/.test(path)) {
-      alert('请将 <你的用户名> 替换为真实的系统用户名后再试。');
+    if (hasPlaceholder(path)) {
+      alert('请将 <你的用户名> 替换为真实的系统用户名后再试。\n\n收到：' + path);
       return;
     }
     try {
@@ -635,13 +659,20 @@ async function openSavedFolder() {
     }
   }
 
-  const originalLabel = $btnOpenFolder.textContent;
   $btnOpenFolder.disabled = true;
   $btnOpenFolder.textContent = '打开中...';
   try {
     const result = await callApi('/open-folder', { path });
     if (result.error) {
-      alert('打开失败: ' + result.error);
+      // 打开失败 → 清掉坏路径,下次点击重新提示
+      try { await chrome.storage.local.remove(['lastFolderPath']); } catch (e) {}
+      const retry = window.confirm(
+        '打开失败：' + result.error + '\n\n是否重新输入路径？\n' +
+        '(点 "取消" 仅关闭弹窗,下次打开将重新提示)'
+      );
+      if (retry) {
+        await openSavedFolder(true);
+      }
     } else {
       $folderPath.textContent = '✅ 已打开: ' + path;
       setTimeout(updateFolderDisplay, 2000);
@@ -715,17 +746,21 @@ $articleList.addEventListener('click', e => {
   discoverChildrenOf(idx).then(result => {
     if (result.ok) {
       expandedSet.add(idx);
+      if (result.count === 0 && !result.cached) {
+        const a = articles[idx];
+        showTreeError(`"${a?.title || ''}" 没有子文档 (lark-cli 返回空)`, result.response);
+      }
       renderArticles();
     } else if (result.reason === 'api-error' || result.reason === 'network-error') {
       const a = articles[idx];
       const title = a ? a.title : `#${idx}`;
-      showTreeError(`展开 “${title}” 失败：${result.error || '未知错误'}（点 ✖ 重试）`);
+      showTreeError(`展开 "${title}" 失败：${result.error || '未知错误'}（点 ✖ 重试）`, result.response);
     }
   });
 });
 
-function showTreeError(msg) {
-  console.warn('[Tree]', msg);
+function showTreeError(msg, response) {
+  console.warn('[Tree]', msg, response);
   const $status = document.getElementById('status');
   if ($status) {
     $status.textContent = msg;
@@ -733,7 +768,15 @@ function showTreeError(msg) {
     clearTimeout(showTreeError._t);
     showTreeError._t = setTimeout(() => {
       $status.classList.remove('status-error');
-    }, 4000);
+    }, 6000);
+  }
+  appendTreeDebug(`❌ ${msg}`);
+  if (response) {
+    try {
+      appendTreeDebug('完整响应: ' + JSON.stringify(response, null, 2));
+    } catch (e) {
+      appendTreeDebug('(无法序列化响应)');
+    }
   }
 }
 
@@ -998,6 +1041,24 @@ document.getElementById('btn-reset').addEventListener('click', init);
 document.getElementById('btn-retry').addEventListener('click', init);
 document.getElementById('btn-error-back').addEventListener('click', init);
 $btnTheme.addEventListener('click', toggleTheme);
-$btnOpenFolder.addEventListener('click', openSavedFolder);
+$btnOpenFolder.addEventListener('click', () => openSavedFolder(false));
+document.getElementById('btn-edit-folder-path').addEventListener('click', async () => {
+  // 显式编辑路径 — 永远弹出 prompt,忽略已存值
+  try { await chrome.storage.local.remove(['lastFolderPath']); } catch (e) {}
+  await openSavedFolder(true);
+});
+
+// 树形调试面板折叠/展开
+document.getElementById('btn-tree-debug-toggle').addEventListener('click', () => {
+  const $log = document.getElementById('tree-debug-log');
+  const $btn = document.getElementById('btn-tree-debug-toggle');
+  if ($log.style.display === 'none') {
+    $log.style.display = 'block';
+    $btn.textContent = '收起';
+  } else {
+    $log.style.display = 'none';
+    $btn.textContent = '展开';
+  }
+});
 
 init();

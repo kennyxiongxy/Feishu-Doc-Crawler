@@ -333,6 +333,45 @@ body {
   color: var(--accent);
 }
 
+.tree-debug {
+  margin: 12px 0;
+  padding: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.tree-debug.hidden {
+  display: none;
+}
+
+.tree-debug-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.tree-debug-log {
+  display: block;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-primary);
+  margin: 0;
+}
+
 /* Tree expand/collapse all button in search row */
 .btn-tree-toggle {
   flex-shrink: 0;
