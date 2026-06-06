@@ -105,6 +105,11 @@ body {
   padding: 16px;
 }
 
+.status.status-error {
+  color: var(--error, #d9534f);
+  font-weight: 500;
+}
+
 /* Header */
 .header {
   display: flex;
@@ -317,6 +322,15 @@ body {
 
 .tree-caret.placeholder:hover {
   color: var(--text-tertiary);
+}
+
+.tree-caret-failed {
+  color: var(--error, #d9534f);
+  font-weight: 700;
+}
+
+.tree-caret-failed:hover {
+  color: var(--accent);
 }
 
 /* Tree expand/collapse all button in search row */

@@ -130,6 +130,8 @@ let selectedSet = new Set();         // indices of checked articles (survives fi
 // Tree state (v5.8)
 let expandedSet = new Set();         // parent indices whose children are visible
 let childrenLoaded = new Set();      // parent indices whose children have been discovered
+let childrenFailed = new Set();      // parent indices whose last discover attempt errored (allow retry)
+let loadingParents = new Set();      // parent indices currently being discovered (for ⏳ caret)
 
 // Theme state (v5.9) — 'light' | 'dark'
 let currentTheme = 'light';
@@ -274,9 +276,18 @@ function renderArticles() {
     const checked = selectedSet.has(i) ? 'checked' : '';
     const isParent = !!a.has_child;
     const isExpanded = expandedSet.has(i);
-    const caret = isParent
-      ? `<span class="tree-caret" data-toggle="${i}">${isExpanded ? '▼' : '▶'}</span>`
-      : `<span class="tree-caret placeholder">·</span>`;
+    const isLoading = loadingParents.has(i);
+    const isFailed = childrenFailed.has(i);
+    let caret;
+    if (!isParent) {
+      caret = '<span class="tree-caret placeholder">·</span>';
+    } else if (isLoading) {
+      caret = `<span class="tree-caret" data-toggle="${i}">⏳</span>`;
+    } else if (isFailed) {
+      caret = `<span class="tree-caret tree-caret-failed" data-toggle="${i}" title="展开失败，点击重试">✖</span>`;
+    } else {
+      caret = `<span class="tree-caret" data-toggle="${i}">${isExpanded ? '▼' : '▶'}</span>`;
+    }
     const indent = depth * 16;
     return `
     <label class="article-item" title="Token: ${token}" style="padding-left: ${8 + indent}px">
@@ -304,22 +315,33 @@ function updateTreeButton() {
 
 async function discoverChildrenOf(parentIdx) {
   const parent = articles[parentIdx];
-  if (!parent || !parent.has_child || childrenLoaded.has(parentIdx)) return [];
+  if (!parent || !parent.has_child) return { ok: false, reason: 'not-parent' };
+  if (childrenLoaded.has(parentIdx)) return { ok: true, count: 0, cached: true };
   const token = parent.doc_token || parent.token;
-  if (!token) return [];
+  if (!token) return { ok: false, reason: 'no-token' };
+  loadingParents.add(parentIdx);
+  childrenFailed.delete(parentIdx);
+  renderArticles();
   try {
     const result = await callApi('/discover', { token });
+    if (result && result.error) {
+      childrenFailed.add(parentIdx);
+      return { ok: false, reason: 'api-error', error: result.error };
+    }
     const children = (result && result.articles) || [];
     if (children.length === 0) {
       childrenLoaded.add(parentIdx);
-      return [];
+      return { ok: true, count: 0 };
     }
     articles = insertChildrenAfter(articles, parentIdx, children);
     childrenLoaded.add(parentIdx);
-    return children.length;
+    return { ok: true, count: children.length };
   } catch (e) {
-    console.warn(`[Tree] discover children of "${parent.title}" failed:`, e.message);
-    return [];
+    childrenFailed.add(parentIdx);
+    return { ok: false, reason: 'network-error', error: e.message || String(e) };
+  } finally {
+    loadingParents.delete(parentIdx);
+    renderArticles();
   }
 }
 
@@ -329,8 +351,8 @@ async function discoverAllUnloaded() {
     if (articles[i].has_child && !childrenLoaded.has(i)) unloaded.push(i);
   }
   if (unloaded.length === 0) return 0;
-  const counts = await Promise.all(unloaded.map(idx => discoverChildrenOf(idx)));
-  return counts.reduce((a, b) => a + b, 0);
+  const results = await Promise.all(unloaded.map(idx => discoverChildrenOf(idx)));
+  return results.reduce((a, r) => a + (r.ok ? r.count : 0), 0);
 }
 
 function getSelectedIndices() {
@@ -476,6 +498,8 @@ async function init() {
     selectedSet = new Set(articles.map((_, i) => i));  // all selected by default
     expandedSet = new Set();
     childrenLoaded = new Set();
+    childrenFailed = new Set();
+    loadingParents = new Set();
 
     renderArticles();
 
@@ -584,18 +608,26 @@ async function openSavedFolder() {
 
   if (!path) {
     const example = navigator.platform.toLowerCase().includes('mac')
-      ? '/Users/yourname/Documents/feishu-crawler'
+      ? '/Users/<你的用户名>/Documents/feishu-crawler'
       : navigator.platform.toLowerCase().includes('win')
-        ? 'C:\\Users\\yourname\\Documents\\feishu-crawler'
-        : '/home/yourname/Documents/feishu-crawler';
+        ? 'C:\\Users\\<你的用户名>\\Documents\\feishu-crawler'
+        : '/home/<你的用户名>/Documents/feishu-crawler';
     const input = window.prompt(
       '请输入保存文件夹的完整路径（用于一键打开）：\n\n' +
+      `示例：${example}\n\n` +
       '提示：路径可在 Finder/文件管理器中右键文件夹选择"显示简介"获取。',
-      example
+      ''
     );
-    if (!input) return;  // user cancelled
+    if (input === null) return;  // user cancelled
     path = input.trim();
-    if (!path) return;
+    if (!path) {
+      alert('路径不能为空。');
+      return;
+    }
+    if (/yourname|<.*?>/.test(path)) {
+      alert('请将 <你的用户名> 替换为真实的系统用户名后再试。');
+      return;
+    }
     try {
       await chrome.storage.local.set({ lastFolderPath: path });
     } catch (e) {
@@ -678,15 +710,32 @@ $articleList.addEventListener('click', e => {
   if (expandedSet.has(idx)) {
     expandedSet.delete(idx);
     renderArticles();
-  } else {
-    discoverChildrenOf(idx).then(n => {
-      if (n > 0 || childrenLoaded.has(idx)) {
-        expandedSet.add(idx);
-        renderArticles();
-      }
-    });
+    return;
   }
+  discoverChildrenOf(idx).then(result => {
+    if (result.ok) {
+      expandedSet.add(idx);
+      renderArticles();
+    } else if (result.reason === 'api-error' || result.reason === 'network-error') {
+      const a = articles[idx];
+      const title = a ? a.title : `#${idx}`;
+      showTreeError(`展开 “${title}” 失败：${result.error || '未知错误'}（点 ✖ 重试）`);
+    }
+  });
 });
+
+function showTreeError(msg) {
+  console.warn('[Tree]', msg);
+  const $status = document.getElementById('status');
+  if ($status) {
+    $status.textContent = msg;
+    $status.classList.add('status-error');
+    clearTimeout(showTreeError._t);
+    showTreeError._t = setTimeout(() => {
+      $status.classList.remove('status-error');
+    }, 4000);
+  }
+}
 
 // Tree: "展开/折叠全部" button
 document.getElementById('btn-tree-toggle').addEventListener('click', async () => {
