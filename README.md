@@ -478,6 +478,7 @@ python3 feishu_server.py
 
 | 版本 | 主要变更 |
 |------|----------|
+| v5.9 | **暗色模式**：CSS 变量 + `body.dark` 覆盖层；首次启动跟随系统（`matchMedia prefers-color-scheme`），点击头部 🌙/☀ 按钮手动切换并保存到 `chrome.storage.local`；新增 31 个 theme 单元测试 |
 | v5.8 | **树形展示**：父节点可展开/折叠子文档（▶/▼ 箭头 + 缩进），支持单点展开和"展开/折叠全部"按钮；搜索时自动展开匹配项的祖先链；`popup.js` 拆为 `popup.js + tree.js` ES module（纯函数可 Node 端单测）；新增 47 个 tree 单元测试 |
 | v5.7 | 服务端 lark-cli 重试（指数退避 1s/2s/4s，最多 4 次）+ 进程级并发限流（信号量 3 路）；弹窗搜索/筛选（实时过滤 + selectedSet 跨筛选保持） |
 | v5.6 | 爬取并发化：文章池 3 路并发 + 文章内图片池 2 路并发 + 原子文件名分配（信号量+链式去重）；13 个并发单元测试 |
@@ -501,7 +502,7 @@ python3 feishu_server.py
 
 **Python 端**（77 个 pytest）：服务端纯函数 — Markdown 清洗、cite 解析、图片提取、token 解析、空间缓存、**重试分类 + with_retry + 并发限流**。
 
-**JS 端**（71 个 Node × 3 套件）：并发原语 + 搜索/筛选 + 树形。
+**JS 端**（102 个 Node × 4 套件）：并发原语 + 搜索/筛选 + 树形 + 主题。
 
 ```bash
 # Python 测试
@@ -513,9 +514,10 @@ python3 -m venv .venv
 node tests/test_concurrency.mjs
 node tests/test_search.mjs
 node tests/test_tree.mjs
+node tests/test_theme.mjs
 ```
 
-测试覆盖：`cell_to_text`、`clean_rich_text_in_markdown`、`parse_cite_elements`、`extract_title_from_markdown`、`extract_images`、`extract_token_from_url`、`get_space_key`、`clean_markdown`（含 callout/cite/富文本段/空行合并）、空间根缓存的"取最多子文档"逻辑、`is_retryable_failure` 永久/瞬时错误分类、`_extract_lark_code` JSON 错误码解析、`with_retry` 指数退避 + 永久错误立即返回、`run_lark_cli_limited` 信号量限流、`Semaphore` JS 信号量、`runPool` 信号量限流 + 取消语义、`allocUniqueName` 原子链式去重 + 跨目录隔离、搜索 filter 大小写不敏感/中文匹配/空集/selectedSet 跨筛选保持、树形 `getDepth` 循环检测、`computeVisible` 展开/搜索/祖先链、`getParentIndices`/`allExpanded`/`insertChildrenAfter` 不可变性。
+测试覆盖：`cell_to_text`、`clean_rich_text_in_markdown`、`parse_cite_elements`、`extract_title_from_markdown`、`extract_images`、`extract_token_from_url`、`get_space_key`、`clean_markdown`（含 callout/cite/富文本段/空行合并）、空间根缓存的"取最多子文档"逻辑、`is_retryable_failure` 永久/瞬时错误分类、`_extract_lark_code` JSON 错误码解析、`with_retry` 指数退避 + 永久错误立即返回、`run_lark_cli_limited` 信号量限流、`Semaphore` JS 信号量、`runPool` 信号量限流 + 取消语义、`allocUniqueName` 原子链式去重 + 跨目录隔离、搜索 filter 大小写不敏感/中文匹配/空集/selectedSet 跨筛选保持、树形 `getDepth` 循环检测、`computeVisible` 展开/搜索/祖先链、`getParentIndices`/`allExpanded`/`insertChildrenAfter` 不可变性、主题 `resolveInitialTheme` 用户偏好覆盖/跟随系统/非法值降级、`resolveNextTheme` 切换 + 未知值默认亮色、按钮图标/aria-label 联动、主题持久化往返。
 
 ---
 

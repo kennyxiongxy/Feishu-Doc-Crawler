@@ -1,4 +1,5 @@
-// popup.js — 飞书文档爬取助手 v5.8
+// popup.js — 飞书文档爬取助手 v5.9
+// v5.9: 暗色模式 — CSS 变量 + body.dark 覆盖；跟随系统 + 手动切换
 // v5.8: 树形展示 — 父节点可展开/折叠子文档，可"展开/折叠全部"
 // v5.7: 弹窗搜索/筛选 — 实时过滤 + selectedSet 跨筛选保持
 // v5.6: 爬取并发化 — 文章池并发 + 文章内图片并发 + 原子文件名分配
@@ -10,6 +11,13 @@ import {
   allExpanded,
   insertChildrenAfter,
 } from './tree.js';
+
+import {
+  resolveInitialTheme,
+  resolveNextTheme,
+  themeButtonIcon,
+  themeButtonLabel,
+} from './theme.js';
 
 const API_BASE = 'http://127.0.0.1:8765';
 
@@ -122,6 +130,9 @@ let selectedSet = new Set();         // indices of checked articles (survives fi
 let expandedSet = new Set();         // parent indices whose children are visible
 let childrenLoaded = new Set();      // parent indices whose children have been discovered
 
+// Theme state (v5.9) — 'light' | 'dark'
+let currentTheme = 'light';
+
 // DOM refs
 const $loading = document.getElementById('status-loading');
 const $ready = document.getElementById('status-ready');
@@ -138,6 +149,7 @@ const $folderPath = document.getElementById('folder-path');
 const $btnStart = document.getElementById('btn-start');
 const $serverStatus = document.getElementById('server-status');
 const $debugInfo = document.getElementById('debug-info');
+const $btnTheme = document.getElementById('btn-theme');
 
 const $progressBar = document.getElementById('progress-bar');
 const $crawlCurrent = document.getElementById('crawl-current');
@@ -158,6 +170,44 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+// ============================================================
+// 主题（v5.9）
+// ============================================================
+function applyTheme(theme) {
+  currentTheme = theme;
+  document.body.classList.toggle('dark', theme === 'dark');
+  $btnTheme.textContent = themeButtonIcon(theme);
+  $btnTheme.setAttribute('aria-label', themeButtonLabel(theme));
+  $btnTheme.setAttribute('title', themeButtonLabel(theme));
+}
+
+function getSystemTheme() {
+  try {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  } catch (e) {
+    return 'light';
+  }
+}
+
+async function loadAndApplyTheme() {
+  let saved = null;
+  try {
+    const stored = await chrome.storage.local.get(['theme']);
+    saved = stored.theme;
+  } catch (e) { /* storage may be unavailable; fall through to system */ }
+  applyTheme(resolveInitialTheme(saved, getSystemTheme()));
+}
+
+async function toggleTheme() {
+  const next = resolveNextTheme(currentTheme);
+  applyTheme(next);
+  try {
+    await chrome.storage.local.set({ theme: next });
+  } catch (e) {
+    console.warn('[Theme] Failed to save theme preference:', e.message);
+  }
 }
 
 // ============================================================
@@ -315,6 +365,9 @@ async function init() {
   $serverStatus.innerHTML = '<span class="server-ok">● 正在连接 API...</span>';
   $articleList.innerHTML = '<div class="no-articles">正在获取文章列表...</div>';
   $debugInfo.textContent = '';
+
+  // 第 0 步：恢复主题（必须在渲染前，避免深浅切换闪屏）
+  await loadAndApplyTheme();
 
   // 第一步：恢复文件夹名（从 chrome.storage.local）
   try {
@@ -842,5 +895,6 @@ document.getElementById('btn-cancel').addEventListener('click', () => { isCancel
 document.getElementById('btn-reset').addEventListener('click', init);
 document.getElementById('btn-retry').addEventListener('click', init);
 document.getElementById('btn-error-back').addEventListener('click', init);
+$btnTheme.addEventListener('click', toggleTheme);
 
 init();
