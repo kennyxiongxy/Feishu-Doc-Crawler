@@ -428,6 +428,32 @@ body {
   white-space: nowrap;
 }
 
+.folder-path-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.folder-path-hint.hidden {
+  display: none;
+}
+
+.folder-path-hint .hint-icon {
+  flex-shrink: 0;
+}
+
+.folder-path-hint > span:nth-of-type(2) {
+  flex: 1;
+  line-height: 1.4;
+}
+
 /* Buttons */
 .btn-primary {
   padding: 6px 14px;

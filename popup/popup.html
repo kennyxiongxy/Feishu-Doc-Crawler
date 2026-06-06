@@ -14,7 +14,7 @@
 
     <div id="status-ready" class="status hidden">
       <div class="header">
-        <h1>飞书文档爬取助手 <span class="version">v5.10.2</span></h1>
+        <h1>飞书文档爬取助手 <span class="version">v5.10.3</span></h1>
         <button id="btn-theme" class="btn-theme" type="button" aria-label="切换主题">🌙</button>
         <div id="server-status" class="server-status"></div>
       </div>
@@ -47,12 +47,17 @@
         <button id="btn-open-folder" class="btn-primary" title="在系统文件管理器中打开保存目录">📁 打开</button>
         <button id="btn-edit-folder-path" class="btn-sm" title="修改保存路径">✏️</button>
       </div>
+      <div id="folder-path-hint" class="folder-path-hint hidden">
+        <span class="hint-icon">💡</span>
+        <span id="folder-path-hint-text">浏览器不允许 JS 读取文件夹的完整路径，需手动输入一次以启用「📁 打开」</span>
+        <button id="btn-set-folder-path" class="btn-sm">立即设置</button>
+      </div>
     </div>
 
     <div id="debug-info" class="debug-info"></div>
     <div id="tree-debug" class="tree-debug hidden">
       <div class="tree-debug-header">
-        <span>🐛 树形调试 (v5.10.2)</span>
+        <span>🐛 树形调试 (v5.10.3)</span>
         <button id="btn-tree-debug-copy" class="btn-sm" title="复制全部调试日志">📋 复制</button>
         <button id="btn-tree-debug-toggle" class="btn-sm">展开</button>
       </div>

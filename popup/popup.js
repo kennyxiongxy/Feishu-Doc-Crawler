@@ -391,17 +391,35 @@ function getSelectedIndices() {
 // ============================================================
 // 文件夹显示更新
 // ============================================================
-function updateFolderDisplay() {
+async function updateFolderDisplay() {
   if (folderName && dirHandle && !needsReauth) {
     $folderPath.textContent = '📁 ' + folderName;
     $folderPath.style.color = '#1f2329';
+    // v5.10.3: 已选文件夹但没设过路径 → 提示用户输入路径
+    await updatePathHint();
   } else if (folderName && needsReauth) {
     $folderPath.textContent = '⚠️ ' + folderName + '（点击重新授权）';
     $folderPath.style.color = '#ff9500';
+    await updatePathHint();
   } else {
     $folderPath.textContent = '未选择';
     $folderPath.style.color = '#8f959e';
+    updatePathHint();  // 隐藏提示
   }
+}
+
+// v5.10.3: 控制 "未设置路径" 提示条 — 只在有 dirHandle 但没 lastFolderPath 时显示
+async function updatePathHint() {
+  const $hint = document.getElementById('folder-path-hint');
+  if (!$hint) return;
+  if (!dirHandle || !folderName) { $hint.classList.add('hidden'); return; }
+  let stored = '';
+  try {
+    const r = await chrome.storage.local.get(['lastFolderPath']);
+    stored = (r.lastFolderPath || '').trim();
+  } catch (e) {}
+  const hasValid = stored && !/yourname|<.*?>/.test(stored);
+  $hint.classList.toggle('hidden', hasValid);
 }
 
 // ============================================================
@@ -642,22 +660,34 @@ async function openSavedFolder(forcePrompt = false) {
   }
 
   if (!path) {
-    const example = navigator.platform.toLowerCase().includes('mac')
-      ? '/Users/<你的用户名>/Documents/feishu-crawler'
-      : navigator.platform.toLowerCase().includes('win')
-        ? 'C:\\Users\\<你的用户名>\\Documents\\feishu-crawler'
-        : '/home/<你的用户名>/Documents/feishu-crawler';
+    // v5.10.3: 用已选 folderName 拼出最可能的路径, 让用户只需要改用户名
+    const selName = folderName || 'feishu-crawler';
+    const isMac = navigator.platform.toLowerCase().includes('mac');
+    const isWin = navigator.platform.toLowerCase().includes('win');
+    const defaultSuggestion = isMac
+      ? `/Users/<你的用户名>/Documents/${selName}`
+      : isWin
+        ? `C:\\Users\\<你的用户名>\\Documents\\${selName}`
+        : `/home/<你的用户名>/Documents/${selName}`;
+
+    const howToFind = isMac
+      ? '在 Finder 右键该文件夹 → 按住 Option 选择"将"文件名"拷贝为路径名"'
+      : isWin
+        ? '在文件管理器选中该文件夹 → 地址栏直接显示完整路径'
+        : '在文件管理器选中该文件夹 → 属性中查看"位置"字段';
+
     const input = window.prompt(
-      '请输入保存文件夹的完整路径（用于一键打开）：\n\n' +
-      `示例：${example}\n\n` +
-      '提示：路径可在 Finder/文件管理器中右键文件夹选择"显示简介"获取。\n' +
-      '输入空值取消。',
-      ''
+      `请输入文件夹 "${selName}" 的完整路径:\n\n` +
+      `预填(请把 <你的用户名> 改为真实用户名): ${defaultSuggestion}\n\n` +
+      `不知道怎么找? ${howToFind}\n` +
+      `点 "取消" 跳过(之后点 "📁 打开" 或下方"立即设置"按钮可再设)`,
+      defaultSuggestion
     );
-    if (input === null || input === '') return;  // user cancelled or empty
+    if (input === null) return;  // user cancelled
     path = input.trim();
+    if (!path) return;
     if (hasPlaceholder(path)) {
-      alert('请将 <你的用户名> 替换为真实的系统用户名后再试。\n\n收到：' + path);
+      alert('请将 <你的用户名> 替换为真实系统用户名后再试。\n\n收到：' + path);
       return;
     }
     try {
@@ -665,8 +695,10 @@ async function openSavedFolder(forcePrompt = false) {
     } catch (e) {
       console.warn('[OpenFolder] Failed to save path:', e.message);
     }
+    await updatePathHint();  // 隐藏提示条
   }
 
+  const originalLabel = '📁 打开';
   $btnOpenFolder.disabled = true;
   $btnOpenFolder.textContent = '打开中...';
   try {
@@ -674,6 +706,7 @@ async function openSavedFolder(forcePrompt = false) {
     if (result.error) {
       // 打开失败 → 清掉坏路径,下次点击重新提示
       try { await chrome.storage.local.remove(['lastFolderPath']); } catch (e) {}
+      await updatePathHint();
       const retry = window.confirm(
         '打开失败：' + result.error + '\n\n是否重新输入路径？\n' +
         '(点 "取消" 仅关闭弹窗,下次打开将重新提示)'
@@ -1057,6 +1090,11 @@ $btnTheme.addEventListener('click', toggleTheme);
 $btnOpenFolder.addEventListener('click', () => openSavedFolder(false));
 document.getElementById('btn-edit-folder-path').addEventListener('click', async () => {
   // 显式编辑路径 — 永远弹出 prompt,忽略已存值
+  try { await chrome.storage.local.remove(['lastFolderPath']); } catch (e) {}
+  await openSavedFolder(true);
+});
+document.getElementById('btn-set-folder-path').addEventListener('click', async () => {
+  // hint 提示条上的 "立即设置" 按钮 → 跟 ✏️ 等价
   try { await chrome.storage.local.remove(['lastFolderPath']); } catch (e) {}
   await openSavedFolder(true);
 });

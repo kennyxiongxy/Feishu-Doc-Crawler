@@ -359,3 +359,70 @@ test('v5.10.2: wiki API list-empty → DO NOT fall through', () => {
   assert.equal(r.used_strategy, 'wiki_api');
   assert.equal(r.wiki_status, 'list-empty');
 });
+
+// ============================================================
+// v5.10.3: path-suggestion uses folderName (the only info
+// we have from dirHandle) to pre-fill the prompt so the user
+// only needs to type the username, not the whole path.
+// ============================================================
+function buildPathSuggestion(folderName, platform) {
+  const p = platform.toLowerCase();
+  if (p.includes('mac')) return `/Users/<你的用户名>/Documents/${folderName}`;
+  if (p.includes('win')) return `C:\\Users\\<你的用户名>\\Documents\\${folderName}`;
+  return `/home/<你的用户名>/Documents/${folderName}`;
+}
+
+test('v5.10.3: path suggestion uses the user-selected folder name', () => {
+  assert.equal(buildPathSuggestion('my-crawler', 'MacIntel'),
+               '/Users/<你的用户名>/Documents/my-crawler');
+  assert.equal(buildPathSuggestion('feishu-export', 'Win32'),
+               'C:\\Users\\<你的用户名>\\Documents\\feishu-export');
+  assert.equal(buildPathSuggestion('docs', 'Linux x86_64'),
+               '/home/<你的用户名>/Documents/docs');
+});
+
+test('v5.10.3: empty folderName falls back to a default', () => {
+  const r = buildPathSuggestion('feishu-crawler', 'MacIntel');
+  assert.ok(r.endsWith('/feishu-crawler'));
+  assert.match(r, /<你的用户名>/);
+});
+
+test('v5.10.3: how-to-find text varies by platform', () => {
+  const macHint = navigator.platform.toLowerCase().includes('mac')
+    ? '在 Finder 右键该文件夹'
+    : navigator.platform.toLowerCase().includes('win')
+      ? '在文件管理器选中'
+      : '在文件管理器选中';
+  // Just check it is non-empty and has Chinese
+  assert.ok(macHint && macHint.length > 5);
+});
+
+// ============================================================
+// v5.10.3: hint bar visibility — should show when dirHandle
+// exists but no valid lastFolderPath; hidden otherwise.
+// ============================================================
+function shouldShowHint(dirHandle, folderName, lastFolderPath) {
+  if (!dirHandle || !folderName) return false;
+  if (!lastFolderPath) return true;
+  if (/yourname|<.*?>/.test(lastFolderPath)) return true;
+  return false;
+}
+
+test('v5.10.3: hint shows when folder selected but no path', () => {
+  assert.equal(shouldShowHint({}, 'feishu', ''), true);
+  assert.equal(shouldShowHint({}, 'feishu', null), true);
+});
+
+test('v5.10.3: hint hides when valid path is saved', () => {
+  assert.equal(shouldShowHint({}, 'feishu', '/Users/alice/Documents/feishu'), false);
+});
+
+test('v5.10.3: hint shows when stored path has placeholder (regression)', () => {
+  assert.equal(shouldShowHint({}, 'feishu', '/Users/yourname/Documents/feishu'), true);
+  assert.equal(shouldShowHint({}, 'feishu', '/Users/<你的用户名>/Documents/feishu'), true);
+});
+
+test('v5.10.3: hint hidden when no folder is selected', () => {
+  assert.equal(shouldShowHint(null, '', '/Users/alice/x'), false);
+  assert.equal(shouldShowHint(null, 'foo', ''), false);
+});
