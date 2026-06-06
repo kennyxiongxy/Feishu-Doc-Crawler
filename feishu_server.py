@@ -13,10 +13,11 @@
 import json
 import re
 import ast
+import base64
 import subprocess
 import sys
 import os
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 import argparse
 
@@ -85,11 +86,12 @@ LARK_CLI = '/opt/homebrew/bin/lark-cli'
 
 # 空间 -> 根页面 token 缓存（持久化到文件）
 import threading
+import time
 import os as _os
 
 _CACHE_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.space_cache.json')
 _space_root_cache = {}
-_cache_lock = threading.Lock()
+_cache_lock = threading.RLock()
 
 
 def _load_cache():
@@ -106,11 +108,12 @@ def _load_cache():
 
 def _save_cache():
     """保存映射到文件"""
-    try:
-        with open(_CACHE_FILE, 'w') as f:
-            json.dump(_space_root_cache, f)
-    except Exception:
-        pass
+    with _cache_lock:
+        try:
+            with open(_CACHE_FILE, 'w') as f:
+                json.dump(_space_root_cache, f)
+        except Exception:
+            pass
 
 
 _load_cache()
@@ -147,6 +150,104 @@ def get_cached_root(space_key):
         return _space_root_cache.get(space_key)
 
 
+# ============================================================
+# lark-cli 调用的重试 + 并发限流
+# ============================================================
+
+# 已知永久性错误码（auth/permission/token 类，不重试）
+# 飞书 OpenAPI: https://open.feishu.cn/document/server-docs/api-call-guide/server-api-list
+PERMANENT_LARK_CODES = {
+    99991663,  # user access token expired
+    99991668,  # invalid access token
+    99991675,  # no permission
+    99991677,  # token revoked
+    99991679,  # token does not exist
+    230001,    # invalid parameter (caller bug, won't help to retry)
+    230002,    # parameter validation failed
+    230006,    # invalid id
+}
+
+
+def _extract_lark_code(err_str):
+    """Try to extract a numeric error code from a lark-cli error string."""
+    if not err_str:
+        return None
+    m = re.search(r'"code"\s*:\s*(\d+)', err_str)
+    return int(m.group(1)) if m else None
+
+
+def is_retryable_failure(err_str):
+    """Decide if a lark-cli error is transient and worth retrying.
+
+    Heuristics:
+      - subprocess/timeout/JSON parse errors → retry (network glitch)
+      - code < 100 → retry (server-side transient)
+      - known permanent codes → no retry
+      - unparseable → retry (safer default)
+    """
+    if not err_str:
+        return True
+    s = err_str.lower()
+    if 'timeout' in s:
+        return True
+    if 'json' in s and 'parse' in s:
+        return True
+    if 'no json found' in s:
+        return True
+    if 'connection' in s or 'network' in s:
+        return True
+    code = _extract_lark_code(err_str)
+    if code is None:
+        return True
+    if code in PERMANENT_LARK_CODES:
+        return False
+    if code < 100:
+        return True
+    return False
+
+
+# 进程级 lark-cli 并发限流：3 路同时调用。
+# 防止 popup 端开 3 路并发 + 用户手动多开 popup 时把 lark-cli / 飞书 API 打爆。
+_lark_cli_semaphore = threading.Semaphore(3)
+
+
+def with_retry(fn, *args, max_attempts=4, base_delay=1.0, **kwargs):
+    """Call fn(*args, **kwargs) with exponential backoff on transient failures.
+
+    fn should return a dict. Returns immediately on success or permanent error.
+    On retryable failure, sleeps 1s, 2s, 4s between attempts (up to max_attempts).
+
+    For lark-cli subprocess calls, use this in conjunction with _lark_cli_semaphore
+    for concurrency limiting.
+    """
+    last_result = None
+    for attempt in range(max_attempts):
+        try:
+            result = fn(*args, **kwargs)
+        except subprocess.TimeoutExpired as e:
+            last_result = {'error': f'lark-cli timeout (attempt {attempt+1}/{max_attempts})'}
+        except Exception as e:
+            return {'error': f'{type(e).__name__}: {str(e)[:200]}'}
+        else:
+            if not (isinstance(result, dict) and 'error' in result):
+                return result  # success
+            err_str = result['error']
+            if not is_retryable_failure(err_str):
+                return result  # permanent
+            last_result = result
+
+        # Backoff before next attempt
+        if attempt < max_attempts - 1:
+            time.sleep(base_delay * (2 ** attempt))
+
+    return last_result
+
+
+def run_lark_cli_limited(fn, *args, **kwargs):
+    """Acquire the lark-cli semaphore and run with retry. Use for any lark-cli subprocess call."""
+    with _lark_cli_semaphore:
+        return with_retry(fn, *args, **kwargs)
+
 
 PORT = 8765
 
@@ -172,8 +273,8 @@ def extract_token_from_url(url):
     return None
 
 
-def run_lark_cli(token):
-    """调用 lark-cli 获取文档原始 JSON"""
+def _run_lark_cli_impl(token):
+    """调用 lark-cli 获取文档原始 JSON (inner impl, no retry)"""
     env = os.environ.copy()
     env['LARK_CLI_NO_PROXY'] = '1'
 
@@ -206,6 +307,11 @@ def run_lark_cli(token):
         return {'error': f'JSON parse error: {e}'}
 
 
+def run_lark_cli(token):
+    """Public entry — wraps _run_lark_cli_impl with concurrency limit + retry."""
+    return run_lark_cli_limited(_run_lark_cli_impl, token)
+
+
 def fetch_doc_content(token):
     """通过 lark-cli 获取文档的 Markdown 内容"""
     data = run_lark_cli(token)
@@ -235,15 +341,15 @@ def fetch_doc_content(token):
 
 
 
-def run_lark_cli_raw(cmd, timeout=30):
-    """Run a lark-cli command and return parsed JSON"""
+def _run_lark_cli_raw_impl(cmd, timeout=30):
+    """Run a lark-cli command and return parsed JSON (inner impl, no retry)"""
     env = os.environ.copy()
     env['LARK_CLI_NO_PROXY'] = '1'
-    
+
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     if result.returncode != 0:
         return {'error': f'lark-cli failed: {result.stderr}'}
-    
+
     # Parse JSON from output (may have leading text like "Found X node(s)")
     lines = result.stdout.split('\n')
     json_start = None
@@ -251,15 +357,20 @@ def run_lark_cli_raw(cmd, timeout=30):
         if l.strip().startswith('{'):
             json_start = i
             break
-    
+
     if json_start is None:
         return {'error': 'No JSON found in output'}
-    
+
     try:
         json_str = '\n'.join(lines[json_start:])
         return json.loads(json_str)
     except json.JSONDecodeError as e:
         return {'error': f'JSON parse error: {e}'}
+
+
+def run_lark_cli_raw(cmd, timeout=30):
+    """Public entry — wraps _run_lark_cli_raw_impl with concurrency limit + retry."""
+    return run_lark_cli_limited(_run_lark_cli_raw_impl, cmd, timeout=timeout)
 
 
 def run_wiki_node_get(token_or_url):
@@ -489,11 +600,11 @@ def extract_images(content):
 
 
 
-def fetch_sheet_content(spreadsheet_token, sheet_id):
-    """读取飞书电子表格内容并转为 Markdown 表格"""
+def _fetch_sheet_raw(spreadsheet_token, sheet_id):
+    """Inner impl: call lark-cli sheets +read, return parsed dict or error."""
     env = os.environ.copy()
     env['LARK_CLI_NO_PROXY'] = '1'
-    
+
     cmd = [
         LARK_CLI, 'sheets', '+read',
         '--spreadsheet-token', spreadsheet_token,
@@ -501,20 +612,31 @@ def fetch_sheet_content(spreadsheet_token, sheet_id):
         '--as', 'user',
         '--value-render-option', 'FormattedValue'
     ]
-    
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env=env)
+    if result.returncode != 0:
+        return {'error': f'lark-cli failed: {result.stderr}'}
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env=env)
-        if result.returncode != 0:
-            return f'*(表格读取失败)*'
-        
         data = json.loads(result.stdout)
         if not data.get('ok'):
-            return f'*(表格读取失败)*'
-        
-        values = data.get('data', {}).get('valueRange', {}).get('values', [])
-        if not values or len(values) < 2:
-            return f'*(空表格)*'
-        
+            return {'error': 'API returned not ok'}
+        return data
+    except json.JSONDecodeError as e:
+        return {'error': f'JSON parse error: {e}'}
+
+
+def fetch_sheet_content(spreadsheet_token, sheet_id):
+    """读取飞书电子表格内容并转为 Markdown 表格 (含重试)"""
+    data = run_lark_cli_limited(_fetch_sheet_raw, spreadsheet_token, sheet_id)
+
+    if 'error' in data:
+        return f'*(表格读取失败: {data["error"][:50]})*'
+
+    values = data.get('data', {}).get('valueRange', {}).get('values', [])
+    if not values or len(values) < 2:
+        return f'*(空表格)*'
+
+    try:
         # 转换为 Markdown 表格
         lines = []
         # Header row
@@ -533,7 +655,7 @@ def fetch_sheet_content(spreadsheet_token, sheet_id):
             while len(cells) < len(headers):
                 cells.append('')
             lines.append('| ' + ' | '.join(cells[:len(headers)]) + ' |')
-        
+
         return '\n\n' + '\n'.join(lines) + '\n\n'
     except Exception as e:
         return f'*(表格读取异常: {str(e)[:50]})*'
@@ -647,10 +769,6 @@ class FeishuHandler(BaseHTTPRequestHandler):
             self.handle_discover(data)
         elif self.path == '/extract':
             self.handle_extract(data)
-        elif self.path == '/extract-batch':
-            self.handle_extract_batch(data)
-        elif self.path == '/read-file':
-            self.handle_read_file(data)
         elif self.path == '/download-image':
             self.handle_download_image(data)
         else:
@@ -693,89 +811,65 @@ class FeishuHandler(BaseHTTPRequestHandler):
             result['token'] = token
             self._send_json(result)
 
-    def handle_extract_batch(self, data):
-        urls = data.get('urls', [])
-        tokens = data.get('tokens', [])
 
-        items = tokens if tokens else urls
-        if not items:
-            self._send_json({'error': 'No URLs or tokens provided'}, 400)
-            return
+    def _download_image_impl(self, file_token, tmp_dir, tmp_name):
+        """Inner impl for handle_download_image — wrapped with retry + limiter."""
+        env = os.environ.copy()
+        env['LARK_CLI_NO_PROXY'] = '1'
+        cmd = [LARK_CLI, 'docs', '+media-preview', '--token', file_token, '--output', tmp_name, '--overwrite', '--as', 'user']
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env, cwd=tmp_dir)
+        # Parse multi-line JSON from stdout
+        output = result.stdout + result.stderr
+        json_str = ''
+        in_json = False
+        depth = 0
+        for ch in output:
+            if ch == '{':
+                in_json = True
+                depth += 1
+                json_str += ch
+            elif ch == '}' and in_json:
+                depth -= 1
+                json_str += ch
+                if depth == 0:
+                    break
+            elif in_json:
+                json_str += ch
 
-        results = []
-        for item in items:
-            token = extract_token_from_url(item) if '/' in item else item
-            if not token:
-                results.append({'item': item, 'error': 'Cannot extract token'})
-                continue
+        if not json_str:
+            return {'error': 'No JSON in output'}
+        try:
+            j = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            return {'error': f'JSON parse error: {e}'}
 
-            print(f'[Server] Batch extracting: {token}')
-            result = fetch_doc_content(token)
-            result['token'] = token
-            results.append(result)
+        if not j.get('ok'):
+            return {'error': 'API returned not ok'}
 
-        self._send_json({'results': results})
+        sp = j.get('data', {}).get('saved_path', '')
+        if not sp or not os.path.exists(sp) or os.path.getsize(sp) <= 100:
+            return {'error': 'Preview file missing or too small'}
 
+        with open(sp, 'rb') as f:
+            img_data = base64.b64encode(f.read()).decode('ascii')
+        return {'ok': True, 'data': img_data, 'size': os.path.getsize(sp)}
 
     def handle_download_image(self, data):
         file_token = data.get('file_token', '')
         if not file_token:
             self._send_json({'error': 'No file_token'}, 400)
             return
-        import tempfile, base64
+        import tempfile
         tmp_dir = tempfile.mkdtemp(prefix='feishu_img_')
         tmp_name = file_token[:16] + '.png'
-        env = os.environ.copy()
-        env['LARK_CLI_NO_PROXY'] = '1'
-        cmd = [LARK_CLI, 'docs', '+media-preview', '--token', file_token, '--output', tmp_name, '--overwrite', '--as', 'user']
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env, cwd=tmp_dir)
-            # Parse multi-line JSON from stdout
-            output = result.stdout + result.stderr
-            json_str = ''
-            in_json = False
-            depth = 0
-            for ch in output:
-                if ch == '{':
-                    in_json = True
-                    depth += 1
-                    json_str += ch
-                elif ch == '}' and in_json:
-                    depth -= 1
-                    json_str += ch
-                    if depth == 0:
-                        break
-                elif in_json:
-                    json_str += ch
-            
-            if json_str:
-                j = json.loads(json_str)
-                if j.get('ok'):
-                    sp = j.get('data', {}).get('saved_path', '')
-                    if sp and os.path.exists(sp) and os.path.getsize(sp) > 100:
-                        with open(sp, 'rb') as f:
-                            img_data = base64.b64encode(f.read()).decode('ascii')
-                        self._send_json({'ok': True, 'data': img_data, 'size': os.path.getsize(sp)})
-                        return
-            self._send_json({'error': 'Preview failed'}, 500)
+            result = run_lark_cli_limited(self._download_image_impl, file_token, tmp_dir, tmp_name)
+            if 'error' in result:
+                self._send_json({'error': result['error']}, 500)
+            else:
+                self._send_json(result)
         except Exception as e:
             self._send_json({'error': str(e)[:200]}, 500)
-
-    def handle_read_file(self, data):
-        """读取本地文件并返回 base64 编码内容"""
-        import base64
-        file_path = data.get('path', '')
-        if not file_path or not os.path.exists(file_path):
-            self._send_json({'error': 'File not found: ' + file_path}, 400)
-            return
-        try:
-            file_size = os.path.getsize(file_path)
-            with open(file_path, 'rb') as f:
-                content = base64.b64encode(f.read()).decode('ascii')
-            os.unlink(file_path)  # 清理临时文件
-            self._send_json({'ok': True, 'data': content, 'size': file_size})
-        except Exception as e:
-            self._send_json({'error': f'Read error: {str(e)[:200]}'}, 500)
 
     def log_message(self, format, *args):
         print(f'[Server] {args[0]}')
@@ -789,7 +883,7 @@ def main():
     args = parser.parse_args()
     PORT = args.port
 
-    server = HTTPServer(('127.0.0.1', PORT), FeishuHandler)
+    server = ThreadingHTTPServer(('127.0.0.1', PORT), FeishuHandler)
     print(f'🚀 飞书文档爬取 API 服务已启动')
     print(f'   地址: http://127.0.0.1:{PORT}')
     print(f'   /discover - 发现子文档列表')

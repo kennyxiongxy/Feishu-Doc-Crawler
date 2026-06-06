@@ -1,4 +1,6 @@
-// popup.js — 飞书文档爬取助手 v5.4
+// popup.js — 飞书文档爬取助手 v5.7
+// v5.7: 弹窗搜索/筛选 — 实时过滤 + selectedSet 跨筛选保持
+// v5.6: 爬取并发化 — 文章池并发 + 文章内图片并发 + 原子文件名分配
 // v5.4: 修复目录持久化 — 分离恢复显示与重新授权
 
 const API_BASE = 'http://127.0.0.1:8765';
@@ -96,6 +98,18 @@ let originalUrl = '';
 let serverAvailable = false;
 let needsReauth = false;  // true 表示有已保存的句柄但需要用户手势重新授权
 
+// Concurrency tuning
+const MAX_ARTICLE_CONCURRENCY = 3;   // parallel articles (each holds 1 lark-cli call)
+const MAX_IMAGE_CONCURRENCY = 2;     // parallel image downloads per article
+
+// Live crawl counters (shared across workers — safe in single-threaded JS)
+let inFlightTitles = new Set();      // article titles currently being processed
+let okCount = 0, failCount = 0;
+
+// Search / filter state
+let searchQuery = '';
+let selectedSet = new Set();         // indices of checked articles (survives filter changes)
+
 // DOM refs
 const $loading = document.getElementById('status-loading');
 const $ready = document.getElementById('status-ready');
@@ -106,6 +120,8 @@ const $error = document.getElementById('status-error');
 const $pageTitle = document.getElementById('page-title');
 const $articleCount = document.getElementById('article-count');
 const $articleList = document.getElementById('article-list');
+const $searchInput = document.getElementById('search-input');
+const $filterStatus = document.getElementById('filter-status');
 const $folderPath = document.getElementById('folder-path');
 const $btnStart = document.getElementById('btn-start');
 const $serverStatus = document.getElementById('server-status');
@@ -167,36 +183,48 @@ async function callApi(endpoint, body) {
 // 文章列表
 // ============================================================
 function renderArticles() {
-  $articleCount.textContent = articles.length;
-  $articleList.innerHTML = articles.map((a, i) => {
+  const q = (searchQuery || '').trim().toLowerCase();
+  const matches = (a) => !q || (a.title || '').toLowerCase().includes(q);
+  const visibleIndices = [];
+  for (let i = 0; i < articles.length; i++) {
+    if (matches(articles[i])) visibleIndices.push(i);
+  }
+
+  $articleCount.textContent = q
+    ? `${selectedSet.size} / ${visibleIndices.length} / ${articles.length}`
+    : `${selectedSet.size} / ${articles.length}`;
+  $filterStatus.textContent = q ? `匹配 ${visibleIndices.length}` : '';
+
+  if (articles.length === 0) {
+    $articleList.innerHTML = '<div class="no-articles">未发现子文章</div>';
+    return;
+  }
+
+  if (visibleIndices.length === 0) {
+    $articleList.innerHTML = `<div class="no-articles">无匹配项 "${escapeHtml(q)}"</div>`;
+    return;
+  }
+
+  $articleList.innerHTML = visibleIndices.map(i => {
+    const a = articles[i];
     const token = a.doc_token || a.token || '';
     const tokenShort = token ? token.substring(0, 12) : 'NO-TOKEN';
+    const checked = selectedSet.has(i) ? 'checked' : '';
     return `
     <label class="article-item" title="Token: ${token}">
-      <input type="checkbox" value="${i}" checked>
+      <input type="checkbox" data-idx="${i}" ${checked}>
       <span class="type-badge">${a.has_child ? '📁' : '📄'}</span>
       <span class="article-title">${escapeHtml(a.title)}</span>
       <span class="token-hint">${tokenShort}</span>
     </label>`;
   }).join('');
-
-  if (articles.length === 0) {
-    $articleList.innerHTML = '<div class="no-articles">未发现子文章，将抓取当前页面</div>';
-    articles = [{ title: '当前页面', token: null, url: originalUrl, doc_token: null }];
-    $articleCount.textContent = '1';
-    $articleList.innerHTML = `<label class="article-item active-article">
-      <input type="checkbox" value="0" checked>
-      <span class="type-badge">📄</span>
-      <span class="article-title">当前页面</span>
-      <span class="token-hint">FALLBACK</span></label>`;
-  }
 }
 
 function getSelectedIndices() {
-  const cbs = $articleList.querySelectorAll('input[type="checkbox"]');
-  const sel = [];
-  cbs.forEach(cb => { if (cb.checked) sel.push(parseInt(cb.value)); });
-  console.log('[Popup] Selected indices:', sel, 'from', cbs.length, 'checkboxes');
+  // Return sorted indices from the persistent set, not from DOM checkboxes
+  // (so filter changes don't lose or gain selections).
+  const sel = [...selectedSet].sort((a, b) => a - b);
+  console.log('[Popup] Selected indices:', sel, 'total', articles.length);
   return sel;
 }
 
@@ -322,6 +350,11 @@ async function init() {
       articles = [{ title: pageTitle || '当前页面', token: extractTokenFromUrl(originalUrl), url: originalUrl }];
     }
 
+    // Reset search & selection state on each init
+    searchQuery = '';
+    $searchInput.value = '';
+    selectedSet = new Set(articles.map((_, i) => i));  // all selected by default
+
     renderArticles();
 
     const uniqueTokens = new Set(articles.map(a => a.doc_token || a.token || '')).size;
@@ -428,15 +461,124 @@ async function ensureDirPermission() {
   return true;
 }
 
+// Select all visible (respects current search filter)
 document.getElementById('btn-select-all').addEventListener('click', () => {
-  $articleList.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
+  $articleList.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    const idx = parseInt(cb.dataset.idx);
+    selectedSet.add(idx);
+    cb.checked = true;
+  });
+  $articleCount.textContent = (searchQuery.trim()
+    ? `${selectedSet.size} / ${~~$articleList.querySelectorAll('input[type="checkbox"]').length} / ${articles.length}`
+    : `${selectedSet.size} / ${articles.length}`);
   updateStartButton();
 });
+// Deselect all visible (does NOT affect items hidden by the filter)
 document.getElementById('btn-deselect-all').addEventListener('click', () => {
-  $articleList.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+  $articleList.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    const idx = parseInt(cb.dataset.idx);
+    selectedSet.delete(idx);
+    cb.checked = false;
+  });
   updateStartButton();
 });
-$articleList.addEventListener('change', e => { if (e.target.type === 'checkbox') updateStartButton(); });
+// Sync selectedSet when user toggles a checkbox
+$articleList.addEventListener('change', e => {
+  if (e.target.type !== 'checkbox') return;
+  const idx = parseInt(e.target.dataset.idx);
+  if (e.target.checked) selectedSet.add(idx);
+  else selectedSet.delete(idx);
+  updateStartButton();
+});
+// Search filter
+$searchInput.addEventListener('input', e => {
+  searchQuery = e.target.value;
+  renderArticles();
+});
+
+// ============================================================
+// 并发原语
+// ============================================================
+
+// 信号量：限制同时执行的任务数。
+class Semaphore {
+  constructor(n) { this._n = n; this._waiters = []; }
+  async acquire() {
+    if (this._n > 0) { this._n--; return; }
+    await new Promise(r => this._waiters.push(r));
+  }
+  release() {
+    const w = this._waiters.shift();
+    if (w) w();          // hand the slot to the next waiter
+    else this._n++;      // no one waiting → return to pool
+  }
+}
+
+// 并发调度器：使用信号量保证实际并发数严格 <= limit。
+// isCancelledFn() 返回 true 时停止派发新任务（在飞的会自然完成）。
+async function runPool(items, limit, worker, isCancelledFn) {
+  if (items.length === 0) return;
+  const sem = new Semaphore(limit);
+  await Promise.all(items.map(async (item, i) => {
+    if (isCancelledFn && isCancelledFn()) return;
+    await sem.acquire();
+    // Re-check after acquire: items may have queued while pool was saturated.
+    if (isCancelledFn && isCancelledFn()) { sem.release(); return; }
+    try {
+      await worker(item, i);
+    } catch (e) {
+      console.warn('[Pool] worker error:', e && e.message);
+    } finally {
+      sem.release();
+    }
+  }));
+}
+
+// 原子文件名分配：同一目录下同一 (base, ext) 链式排队，
+// 避免并发 worker 撞到同一个名字。
+// 不同 dirHandle 隔离（通过 WeakMap 标签）。
+const _dirTagCounter = { n: 0 };
+const _dirTags = new WeakMap();
+function getDirTag(dirHandle) {
+  let tag = _dirTags.get(dirHandle);
+  if (!tag) {
+    tag = `d${++_dirTagCounter.n}`;
+    _dirTags.set(dirHandle, tag);
+  }
+  return tag;
+}
+const _nameChains = new Map();  // key -> tail Promise
+
+function allocUniqueName(dirHandle, base, ext) {
+  const key = `${getDirTag(dirHandle)}::${base}.${ext}`;
+  const prev = _nameChains.get(key) || Promise.resolve();
+  const next = prev.then(async () => {
+    for (let n = 1; n < 1000; n++) {
+      const name = n === 1 ? `${base}.${ext}` : `${base}_${n}.${ext}`;
+      let exists = false;
+      try {
+        await dirHandle.getFileHandle(name, { create: false });
+        exists = true;
+      } catch (_) { /* not found -> unused */ }
+      if (!exists) {
+        await dirHandle.getFileHandle(name, { create: true });
+        return name;
+      }
+    }
+    throw new Error(`Too many duplicates for ${key}`);
+  });
+  _nameChains.set(key, next.catch(() => {}));
+  return next;
+}
+
+// 更新爬取中的进度文案（处理中的文章列表）
+function updateCrawlProgress() {
+  const titles = [...inFlightTitles].slice(0, 3);
+  const more = inFlightTitles.size > 3 ? ` 等 ${inFlightTitles.size} 篇` : '';
+  const tail = titles.length > 0 ? ` — 处理中: ${titles.join(', ')}${more}` : '';
+  $crawlCurrent.textContent = `完成 ${okCount + failCount}${tail}`;
+  $crawlStats.textContent = `✅ ${okCount}  ❌ ${failCount}`;
+}
 
 // ============================================================
 // 爬取
@@ -465,6 +607,13 @@ $btnStart.addEventListener('click', async () => {
   showStatus('status-crawling');
   $progressBar.style.width = '0%';
 
+  // Reset shared crawl state
+  inFlightTitles = new Set();
+  okCount = 0;
+  failCount = 0;
+  _nameChains.clear();
+  updateCrawlProgress();
+
   let imagesDir;
   try { imagesDir = await dirHandle.getDirectoryHandle('images', { create: true }); }
   catch (e) { imagesDir = await dirHandle.getDirectoryHandle('images'); }
@@ -474,134 +623,120 @@ $btnStart.addEventListener('click', async () => {
     console.log(`[Crawler] Target #${i}: ${a.title} | doc_token=${a.doc_token} | token=${a.token} | url=${a.url}`);
     return a;
   });
-  
-  // 展开带有子文档的文章 (has_child: true)
+
+  // 并行展开带子文档的父节点
   console.log(`[Crawler] Checking ${targets.length} targets for children...`);
-  const childTargets = [];
-  for (const t of targets) {
-    if (t.has_child) {
-      console.log(`[Crawler] Expanding children of: ${t.title}`);
-      $crawlStats.textContent = `正在发现 "${t.title}" 的子文档...`;
-      try {
-        const childResult = await callApi('/discover', { token: t.doc_token || t.token });
-        if (childResult.articles && childResult.articles.length > 0) {
-          console.log(`[Crawler] Found ${childResult.articles.length} children for: ${t.title}`);
-          for (const child of childResult.articles) {
-            childTargets.push(child);
-          }
-        }
-      } catch (e) {
-        console.warn(`[Crawler] Failed to discover children of: ${t.title}`, e.message);
-      }
+  const parentTargets = targets.filter(t => t.has_child);
+  if (parentTargets.length > 0) {
+    $crawlStats.textContent = `正在发现 ${parentTargets.length} 个父节点的子文档...`;
+    const childResults = await Promise.all(
+      parentTargets.map(t =>
+        callApi('/discover', { token: t.doc_token || t.token })
+          .then(r => r.articles || [])
+          .catch(e => { console.warn(`[Crawler] Child discover failed: ${t.title}`, e.message); return []; })
+      )
+    );
+    let addedCount = 0;
+    for (const arr of childResults) {
+      for (const child of arr) { targets.push(child); addedCount++; }
     }
+    console.log(`[Crawler] Total targets after expansion: ${targets.length} (added ${addedCount} children)`);
   }
-  targets.push(...childTargets);
-  console.log(`[Crawler] Total targets after expansion: ${targets.length} (added ${childTargets.length} children)`);
   const total = targets.length;
-  let done = 0, okCount = 0, failCount = 0;
   const okFiles = [], failFiles = [];
 
-  for (let i = 0; i < targets.length; i++) {
-    if (isCancelled) break;
-    const art = targets[i];
-
-    console.log(`[Crawler] === Iteration ${i+1}/${total}: ${art.title} ===`);
-    $crawlCurrent.textContent = `[${i + 1}/${total}] ${art.title}`;
-    $crawlStats.textContent = `正在调用 API...`;
+  // 处理单篇文章：extract → 并行下图片 → 原子写文件
+  async function processArticle(art) {
+    if (isCancelled) return;
+    inFlightTitles.add(art.title);
+    updateCrawlProgress();
 
     try {
       const body = {};
-      if (art.doc_token) {
-        body.token = art.doc_token;
-        console.log(`[Crawler] Using doc_token: ${art.doc_token}`);
-      } else if (art.token) {
-        body.token = art.token;
-        console.log(`[Crawler] Using token: ${art.token}`);
-      } else if (art.url) {
-        body.url = art.url;
-        console.log(`[Crawler] Using url: ${art.url}`);
-      } else {
-        body.url = originalUrl;
-        console.log(`[Crawler] FALLBACK to originalUrl: ${originalUrl}`);
-      }
+      if (art.doc_token) body.token = art.doc_token;
+      else if (art.token) body.token = art.token;
+      else if (art.url) body.url = art.url;
+      else body.url = originalUrl;
 
       const result = await callApi('/extract', body);
+      if (isCancelled) return;
       if (result.error) throw new Error(result.error);
 
       let md = result.content || '';
       const title = result.title || art.title;
       const imgs = result.images || [];
 
-      console.log(`[Crawler] Got content: title="${title}", ${md.length} chars, ${imgs.length} images`);
+      console.log(`[Crawler] ${art.title}: ${md.length} chars, ${imgs.length} images`);
 
-      // 图片下载（通过服务端 lark-cli media-preview）
-      for (let j = 0; j < imgs.length; j++) {
-        if (isCancelled) break;
-        const fileToken = imgs[j].file_token;
-        if (!fileToken) continue;
-        try {
-          $crawlStats.textContent = `下载图片 ${j+1}/${imgs.length}...`;
-          const imgResult = await callApi('/download-image', { file_token: fileToken });
-          if (imgResult && imgResult.ok && imgResult.data) {
-            const byteChars = atob(imgResult.data);
-            const byteNums = new Uint8Array(byteChars.length);
-            for (let k = 0; k < byteChars.length; k++) byteNums[k] = byteChars.charCodeAt(k);
-            const blob = new Blob([byteNums], { type: 'image/' + imgs[j].ext });
-            if (blob.size > 1000) {
-              const name = sanitizeFilename(title) + '_' + (j + 1) + '.' + imgs[j].ext;
-              const fh = await imagesDir.getFileHandle(name, { create: true });
-              const w = await fh.createWritable(); await w.write(blob); await w.close();
-              md = md.split(imgs[j].url).join('./images/' + name);
-              console.log(`[Crawler] Image saved: ${name} (${blob.size} bytes)`);
+      // 并行下图片（同一文章内最多 2 路）
+      if (imgs.length > 0) {
+        const urlReplacements = [];
+        await runPool(imgs, MAX_IMAGE_CONCURRENCY, async (img, j) => {
+          if (isCancelled) return;
+          const fileToken = img.file_token;
+          if (!fileToken) return;
+          try {
+            const imgResult = await callApi('/download-image', { file_token: fileToken });
+            if (isCancelled) return;
+            if (imgResult && imgResult.ok && imgResult.data) {
+              const byteChars = atob(imgResult.data);
+              const byteNums = new Uint8Array(byteChars.length);
+              for (let k = 0; k < byteChars.length; k++) byteNums[k] = byteChars.charCodeAt(k);
+              const blob = new Blob([byteNums], { type: 'image/' + img.ext });
+              if (blob.size > 1000) {
+                const desiredBase = sanitizeFilename(title) + '_' + (j + 1);
+                const name = await allocUniqueName(imagesDir, desiredBase, img.ext);
+                const fh = await imagesDir.getFileHandle(name, { create: true });
+                const w = await fh.createWritable(); await w.write(blob); await w.close();
+                urlReplacements.push({ from: img.url, to: './images/' + name });
+                console.log(`[Crawler] Image saved: ${name} (${blob.size} bytes)`);
+              } else {
+                console.warn(`[Crawler] Image too small: ${blob.size} bytes`);
+              }
             } else {
-              console.warn(`[Crawler] Image too small (${blob.size} bytes)`);
+              console.warn(`[Crawler] Image failed:`, imgResult?.error);
             }
-          } else {
-            console.warn(`[Crawler] Image failed:`, imgResult?.error);
+          } catch (ie) {
+            console.warn(`[Crawler] Image error:`, ie.message);
           }
-        } catch (ie) {
-          console.warn(`[Crawler] Image error:`, ie.message);
+        }, () => isCancelled);
+        // Apply URL replacements sequentially after all downloads finish
+        for (const r of urlReplacements) {
+          md = md.split(r.from).join(r.to);
         }
       }
 
+      if (isCancelled) return;
+
       const full = '# ' + title + '\n\n' + md;
-
-      // 文件名去重
-      let fn = sanitizeFilename(title) + '.md';
-      try {
-        await dirHandle.getFileHandle(fn);
-        const base = sanitizeFilename(title);
-        for (let s = 2; s < 100; s++) {
-          try { await dirHandle.getFileHandle(base + '_' + s + '.md'); }
-          catch (e) { fn = base + '_' + s + '.md'; break; }
-        }
-      } catch (e) {}
-
+      const fn = await allocUniqueName(dirHandle, sanitizeFilename(title), 'md');
       const fh = await dirHandle.getFileHandle(fn, { create: true });
       const w = await fh.createWritable(); await w.write(full); await w.close();
 
       okCount++;
       okFiles.push(fn);
       console.log(`[Crawler] ✅ Saved: ${fn} (${full.length} chars)`);
-      $crawlStats.textContent = `${done + 1}/${total} 已完成`;
     } catch (err) {
       failCount++;
       failFiles.push(art.title + ': ' + err.message);
-      console.error(`[Crawler] ❌ FAIL #${i+1}: ${art.title}`, err);
-      $crawlStats.textContent = `${done + 1}/${total} (${failCount} 失败)`;
+      console.error(`[Crawler] ❌ FAIL: ${art.title}`, err);
+    } finally {
+      inFlightTitles.delete(art.title);
+      $progressBar.style.width = Math.round(((okCount + failCount) / total) * 100) + '%';
+      updateCrawlProgress();
     }
-
-    done++;
-    $progressBar.style.width = Math.round((done / total) * 100) + '%';
   }
 
+  // 并发池跑所有文章（最多 3 路）
+  await runPool(targets, MAX_ARTICLE_CONCURRENCY, processArticle, () => isCancelled);
+
   crawlInProgress = false;
-  console.log(`[Crawler] Done: ${okCount} ok, ${failCount} fail`);
+  console.log(`[Crawler] Done: ${okCount} ok, ${failCount} fail (cancelled=${isCancelled})`);
 
   let msg = okCount > 0 ? `✅ 成功保存 ${okCount} 个文件` : '';
-  if (okFiles.length <= 5) msg += ':\n  ' + okFiles.join('\n  ');
+  if (okFiles.length <= 5 && okFiles.length > 0) msg += ':\n  ' + okFiles.join('\n  ');
   if (failCount > 0) msg += `\n❌ 失败 ${failCount} 个:\n  ` + failFiles.slice(0, 3).join('\n  ');
-  if (isCancelled) msg += '\n⚠️ 已取消';
+  if (isCancelled) msg += '\n⚠️ 已取消（部分文章可能未开始）';
 
   $completeMsg.innerHTML = msg.replace(/\n/g, '<br>');
   showStatus('status-complete');

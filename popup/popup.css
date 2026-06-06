@@ -115,6 +115,41 @@ body {
   margin-bottom: 8px;
 }
 
+/* Search row */
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+#search-input {
+  flex: 1;
+  padding: 5px 9px;
+  font-size: 12px;
+  border: 1px solid #dee0e3;
+  border-radius: 4px;
+  background: #fff;
+  color: #1f2329;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+#search-input:focus {
+  border-color: #3370ff;
+}
+
+#search-input::placeholder {
+  color: #8f959e;
+}
+
+.filter-status {
+  font-size: 11px;
+  color: #3370ff;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .article-item {
   display: flex;
   align-items: flex-start;

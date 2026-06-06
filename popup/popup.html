@@ -14,7 +14,7 @@
 
   <div id="status-ready" class="status hidden">
     <div class="header">
-      <h1>飞书文档爬取助手 <span class="version">v5.4</span></h1>
+      <h1>飞书文档爬取助手 <span class="version">v5.7</span></h1>
       <div id="server-status" class="server-status"></div>
     </div>
 
@@ -25,6 +25,10 @@
 
     <div class="section">
       <div class="label">文章列表 (<span id="article-count">0</span>)</div>
+      <div class="search-row">
+        <input id="search-input" type="text" placeholder="🔍 搜索标题..." autocomplete="off" spellcheck="false">
+        <span id="filter-status" class="filter-status"></span>
+      </div>
       <div class="article-list" id="article-list">
       </div>
       <div class="select-actions">
