@@ -557,3 +557,231 @@ class TestLarkCliLimiter:
         # the result should reflect the retry succeeding
         assert result.get('ok') is True
         assert len(calls) == 2
+
+
+class TestOpenFolderValidation:
+    """validate_open_folder_path — pure validation, no subprocess."""
+
+    def test_valid_absolute_dir(self, server_module, tmp_path):
+        valid, path = server_module.validate_open_folder_path(str(tmp_path))
+        assert valid is True
+        assert path == str(tmp_path)
+
+    def test_none_path_rejected(self, server_module):
+        valid, err = server_module.validate_open_folder_path(None)
+        assert valid is False
+        assert '字符串' in err
+
+    def test_empty_string_rejected(self, server_module):
+        valid, err = server_module.validate_open_folder_path('')
+        assert valid is False
+        assert '缺少' in err
+
+    def test_whitespace_only_rejected(self, server_module):
+        valid, err = server_module.validate_open_folder_path('   \t  ')
+        assert valid is False
+        assert '缺少' in err
+
+    def test_relative_path_rejected(self, server_module):
+        valid, err = server_module.validate_open_folder_path('./some/dir')
+        assert valid is False
+        assert '绝对路径' in err
+
+    def test_non_string_rejected(self, server_module):
+        valid, err = server_module.validate_open_folder_path(42)
+        assert valid is False
+        assert '字符串' in err
+
+    def test_nonexistent_dir_rejected(self, server_module, tmp_path):
+        ghost = str(tmp_path / 'does-not-exist')
+        valid, err = server_module.validate_open_folder_path(ghost)
+        assert valid is False
+        assert '不存在' in err
+
+    def test_path_is_file_rejected(self, server_module, tmp_path):
+        # A path that exists but is a file, not a dir
+        f = tmp_path / 'a.txt'
+        f.write_text('hi')
+        valid, err = server_module.validate_open_folder_path(str(f))
+        assert valid is False
+        assert '不存在' in err  # isdir() returns False for files
+
+    def test_whitespace_stripped(self, server_module, tmp_path):
+        valid, path = server_module.validate_open_folder_path(f'  {tmp_path}  ')
+        assert valid is True
+        assert path == str(tmp_path)
+
+
+class TestOpenFolderOsDispatch:
+    """open_folder_in_os — mock subprocess.Popen to verify command per platform."""
+
+    def test_macos_uses_open(self, server_module, tmp_path, monkeypatch):
+        calls = []
+        def fake_popen(cmd, *args, **kwargs):
+            calls.append(cmd)
+        monkeypatch.setattr(server_module.subprocess, 'Popen', fake_popen)
+        monkeypatch.setattr(server_module.platform, 'system', lambda: 'Darwin')
+
+        success, system, err = server_module.open_folder_in_os(str(tmp_path))
+        assert success is True
+        assert system == 'Darwin'
+        assert err is None
+        assert calls == [['open', str(tmp_path)]]
+
+    def test_windows_uses_explorer(self, server_module, tmp_path, monkeypatch):
+        calls = []
+        def fake_popen(cmd, *args, **kwargs):
+            calls.append(cmd)
+        monkeypatch.setattr(server_module.subprocess, 'Popen', fake_popen)
+        monkeypatch.setattr(server_module.platform, 'system', lambda: 'Windows')
+
+        success, system, err = server_module.open_folder_in_os(str(tmp_path))
+        assert success is True
+        assert system == 'Windows'
+        # Path should be normalized (forward → back slashes on Windows is os.normpath's job;
+        # on POSIX normpath is a no-op)
+        assert calls[0][0] == 'explorer'
+
+    def test_linux_uses_xdg_open(self, server_module, tmp_path, monkeypatch):
+        calls = []
+        def fake_popen(cmd, *args, **kwargs):
+            calls.append(cmd)
+        monkeypatch.setattr(server_module.subprocess, 'Popen', fake_popen)
+        monkeypatch.setattr(server_module.platform, 'system', lambda: 'Linux')
+
+        success, system, err = server_module.open_folder_in_os(str(tmp_path))
+        assert success is True
+        assert system == 'Linux'
+        assert calls == [['xdg-open', str(tmp_path)]]
+
+    def test_unknown_platform_falls_back_to_xdg_open(self, server_module, tmp_path, monkeypatch):
+        calls = []
+        def fake_popen(cmd, *args, **kwargs):
+            calls.append(cmd)
+        monkeypatch.setattr(server_module.subprocess, 'Popen', fake_popen)
+        monkeypatch.setattr(server_module.platform, 'system', lambda: 'FreeBSD')
+
+        success, system, err = server_module.open_folder_in_os(str(tmp_path))
+        assert success is True
+        assert calls == [['xdg-open', str(tmp_path)]]
+
+    def test_subprocess_failure_returns_error(self, server_module, tmp_path, monkeypatch):
+        def fake_popen(cmd, *args, **kwargs):
+            raise FileNotFoundError(2, 'No such file', cmd[0])
+        monkeypatch.setattr(server_module.subprocess, 'Popen', fake_popen)
+        monkeypatch.setattr(server_module.platform, 'system', lambda: 'Darwin')
+
+        success, system, err = server_module.open_folder_in_os(str(tmp_path))
+        assert success is False
+        assert system == 'Darwin'
+        assert 'open' in err  # error mentions the command name
+
+
+class TestOpenFolderHttpEndpoint:
+    """handle_open_folder — full HTTP request/response via urllib."""
+
+    def test_valid_path_returns_ok(self, server_module, tmp_path):
+        import json
+        from http.client import HTTPConnection
+
+        server = server_module.ThreadingHTTPServer(('127.0.0.1', 0), server_module.FeishuHandler)
+        port = server.server_address[1]
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            conn = HTTPConnection('127.0.0.1', port, timeout=5)
+            body = json.dumps({'path': str(tmp_path)}).encode('utf-8')
+            conn.request('POST', '/open-folder', body, {'Content-Type': 'application/json'})
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode('utf-8'))
+            assert resp.status == 200
+            assert data.get('ok') is True
+            assert data.get('path') == str(tmp_path)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_missing_path_returns_400(self, server_module):
+        import json
+        from http.client import HTTPConnection
+
+        server = server_module.ThreadingHTTPServer(('127.0.0.1', 0), server_module.FeishuHandler)
+        port = server.server_address[1]
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            conn = HTTPConnection('127.0.0.1', port, timeout=5)
+            conn.request('POST', '/open-folder', b'{}', {'Content-Type': 'application/json'})
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode('utf-8'))
+            assert resp.status == 400
+            # No path → data.get('path') returns None → "path 必须是字符串"
+            assert '字符串' in data.get('error', '')
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_empty_string_path_returns_400(self, server_module):
+        import json
+        from http.client import HTTPConnection
+
+        server = server_module.ThreadingHTTPServer(('127.0.0.1', 0), server_module.FeishuHandler)
+        port = server.server_address[1]
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            conn = HTTPConnection('127.0.0.1', port, timeout=5)
+            body = json.dumps({'path': ''}).encode('utf-8')
+            conn.request('POST', '/open-folder', body, {'Content-Type': 'application/json'})
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode('utf-8'))
+            assert resp.status == 400
+            assert '缺少' in data.get('error', '')
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_relative_path_returns_400(self, server_module):
+        import json
+        from http.client import HTTPConnection
+
+        server = server_module.ThreadingHTTPServer(('127.0.0.1', 0), server_module.FeishuHandler)
+        port = server.server_address[1]
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            conn = HTTPConnection('127.0.0.1', port, timeout=5)
+            body = json.dumps({'path': './relative/dir'}).encode('utf-8')
+            conn.request('POST', '/open-folder', body, {'Content-Type': 'application/json'})
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode('utf-8'))
+            assert resp.status == 400
+            assert '绝对路径' in data.get('error', '')
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_nonexistent_path_returns_400(self, server_module, tmp_path):
+        import json
+        from http.client import HTTPConnection
+
+        server = server_module.ThreadingHTTPServer(('127.0.0.1', 0), server_module.FeishuHandler)
+        port = server.server_address[1]
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            conn = HTTPConnection('127.0.0.1', port, timeout=5)
+            body = json.dumps({'path': str(tmp_path / 'nope')}).encode('utf-8')
+            conn.request('POST', '/open-folder', body, {'Content-Type': 'application/json'})
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode('utf-8'))
+            assert resp.status == 400
+            assert '不存在' in data.get('error', '')
+        finally:
+            server.shutdown()
+            server.server_close()

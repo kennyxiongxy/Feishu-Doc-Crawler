@@ -1,4 +1,5 @@
-// popup.js — 飞书文档爬取助手 v5.9
+// popup.js — 飞书文档爬取助手 v5.10
+// v5.10: 一键打开保存文件夹 — 服务端 /open-folder 端点，prompt 输入完整路径
 // v5.9: 暗色模式 — CSS 变量 + body.dark 覆盖；跟随系统 + 手动切换
 // v5.8: 树形展示 — 父节点可展开/折叠子文档，可"展开/折叠全部"
 // v5.7: 弹窗搜索/筛选 — 实时过滤 + selectedSet 跨筛选保持
@@ -147,6 +148,7 @@ const $searchInput = document.getElementById('search-input');
 const $filterStatus = document.getElementById('filter-status');
 const $folderPath = document.getElementById('folder-path');
 const $btnStart = document.getElementById('btn-start');
+const $btnOpenFolder = document.getElementById('btn-open-folder');
 const $serverStatus = document.getElementById('server-status');
 const $debugInfo = document.getElementById('debug-info');
 const $btnTheme = document.getElementById('btn-theme');
@@ -569,6 +571,57 @@ document.getElementById('btn-folder').addEventListener('click', async () => {
   }
 });
 
+// ============================================================
+// 打开保存文件夹（v5.10）
+// 首次需要用户输入完整路径（File System Access API 不暴露路径给 JS）
+// ============================================================
+async function openSavedFolder() {
+  let path = null;
+  try {
+    const stored = await chrome.storage.local.get(['lastFolderPath']);
+    path = (stored.lastFolderPath || '').trim();
+  } catch (e) { /* fall through to prompt */ }
+
+  if (!path) {
+    const example = navigator.platform.toLowerCase().includes('mac')
+      ? '/Users/yourname/Documents/feishu-crawler'
+      : navigator.platform.toLowerCase().includes('win')
+        ? 'C:\\Users\\yourname\\Documents\\feishu-crawler'
+        : '/home/yourname/Documents/feishu-crawler';
+    const input = window.prompt(
+      '请输入保存文件夹的完整路径（用于一键打开）：\n\n' +
+      '提示：路径可在 Finder/文件管理器中右键文件夹选择"显示简介"获取。',
+      example
+    );
+    if (!input) return;  // user cancelled
+    path = input.trim();
+    if (!path) return;
+    try {
+      await chrome.storage.local.set({ lastFolderPath: path });
+    } catch (e) {
+      console.warn('[OpenFolder] Failed to save path:', e.message);
+    }
+  }
+
+  const originalLabel = $btnOpenFolder.textContent;
+  $btnOpenFolder.disabled = true;
+  $btnOpenFolder.textContent = '打开中...';
+  try {
+    const result = await callApi('/open-folder', { path });
+    if (result.error) {
+      alert('打开失败: ' + result.error);
+    } else {
+      $folderPath.textContent = '✅ 已打开: ' + path;
+      setTimeout(updateFolderDisplay, 2000);
+    }
+  } catch (e) {
+    alert('网络错误: ' + (e.message || e));
+  } finally {
+    $btnOpenFolder.disabled = false;
+    $btnOpenFolder.textContent = originalLabel;
+  }
+}
+
 // 开始爬取前确保权限有效
 async function ensureDirPermission() {
   if (!dirHandle) return false;
@@ -896,5 +949,6 @@ document.getElementById('btn-reset').addEventListener('click', init);
 document.getElementById('btn-retry').addEventListener('click', init);
 document.getElementById('btn-error-back').addEventListener('click', init);
 $btnTheme.addEventListener('click', toggleTheme);
+$btnOpenFolder.addEventListener('click', openSavedFolder);
 
 init();
