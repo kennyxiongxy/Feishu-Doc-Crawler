@@ -319,17 +319,25 @@ async function discoverChildrenOf(parentIdx) {
   if (childrenLoaded.has(parentIdx)) return { ok: true, count: 0, cached: true };
   const token = parent.doc_token || parent.token;
   if (!token) return { ok: false, reason: 'no-token' };
+  // v5.10.2: 优先用 URL (含 https:// 或 /wiki/ 或 feishu.cn), 兜底用 token
+  // lark-cli 1.0.48+ 的 +node-get 对 URL 能自动推断 obj_type, 对 raw token 不行
+  const url = parent.url;
+  const reqBody = (url && (url.includes('://') || url.startsWith('/wiki/') || url.includes('feishu.cn')))
+    ? { url }
+    : { token };
   loadingParents.add(parentIdx);
   childrenFailed.delete(parentIdx);
   renderArticles();
   const t0 = Date.now();
   const logLine = msg => appendTreeDebug(`[${Date.now() - t0}ms] ${msg}`);
-  logLine(`discoverChildrenOf(${parentIdx}) title="${(parent.title || '').slice(0, 30)}" token=${(token || '').slice(0, 16)}`);
+  logLine(`discoverChildrenOf(${parentIdx}) title="${(parent.title || '').slice(0, 30)}" ` +
+          `req=${url ? 'url' : 'token'}=${(url || token || '').slice(0, 40)}`);
   try {
-    const result = await callApi('/discover', { token });
+    const result = await callApi('/discover', reqBody);
     logLine(`API response keys=${result ? Object.keys(result).join(',') : 'null'}` +
             (result && result.articles ? ` count=${result.articles.length}` : '') +
-            (result && result.error ? ` error="${result.error}"` : ''));
+            (result && result.error ? ` error="${result.error}"` : '') +
+            (result && result.wiki_status ? ` wiki_status=${result.wiki_status}` : ''));
     if (result && result.error) {
       childrenFailed.add(parentIdx);
       return { ok: false, reason: 'api-error', error: result.error, response: result };
@@ -748,7 +756,10 @@ $articleList.addEventListener('click', e => {
       expandedSet.add(idx);
       if (result.count === 0 && !result.cached) {
         const a = articles[idx];
-        showTreeError(`"${a?.title || ''}" 没有子文档 (lark-cli 返回空)`, result.response);
+        const resp = result.response || {};
+        const ws = resp.wiki_status || 'unknown';
+        const msg = `"${a?.title || ''}" 没有子文档 (wiki_status=${ws})`;
+        showTreeError(msg, result.response);
       }
       renderArticles();
     } else if (result.reason === 'api-error' || result.reason === 'network-error') {
@@ -768,15 +779,17 @@ function showTreeError(msg, response) {
     clearTimeout(showTreeError._t);
     showTreeError._t = setTimeout(() => {
       $status.classList.remove('status-error');
-    }, 6000);
+    }, 8000);
   }
   appendTreeDebug(`❌ ${msg}`);
   if (response) {
-    try {
-      appendTreeDebug('完整响应: ' + JSON.stringify(response, null, 2));
-    } catch (e) {
-      appendTreeDebug('(无法序列化响应)');
+    if (response.wiki_status) {
+      appendTreeDebug(`  wiki_status: ${response.wiki_status}`);
     }
+    if (response.message) {
+      appendTreeDebug(`  message: ${response.message}`);
+    }
+    appendTreeDebug('完整响应: ' + JSON.stringify(response, null, 2));
   }
 }
 
@@ -1058,6 +1071,19 @@ document.getElementById('btn-tree-debug-toggle').addEventListener('click', () =>
   } else {
     $log.style.display = 'none';
     $btn.textContent = '展开';
+  }
+});
+document.getElementById('btn-tree-debug-copy').addEventListener('click', async () => {
+  const $log = document.getElementById('tree-debug-log');
+  const text = $log ? $log.textContent : '';
+  try {
+    await navigator.clipboard.writeText(text);
+    const $btn = document.getElementById('btn-tree-debug-copy');
+    const orig = $btn.textContent;
+    $btn.textContent = '✅ 已复制';
+    setTimeout(() => { $btn.textContent = orig; }, 1500);
+  } catch (e) {
+    alert('复制失败: ' + e.message);
   }
 });
 

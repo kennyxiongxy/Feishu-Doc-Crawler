@@ -785,3 +785,72 @@ class TestOpenFolderHttpEndpoint:
         finally:
             server.shutdown()
             server.server_close()
+
+
+class TestWikiApiUrlDetection:
+    """v5.10.2: 验证 lark-cli 1.0.48+ 的 URL/token 检测逻辑"""
+
+    def test_url_detection_https(self):
+        from feishu_server import _is_wiki_url
+        assert _is_wiki_url('https://feishu.cn/wiki/abc') is True
+        assert _is_wiki_url('https://vcnvmnln7wit.feishu.cn/wiki/Vo0E') is True
+
+    def test_url_detection_relative(self):
+        from feishu_server import _is_wiki_url
+        assert _is_wiki_url('/wiki/abc123') is True
+
+    def test_url_detection_raw_token(self):
+        from feishu_server import _is_wiki_url
+        assert _is_wiki_url('Vo0EwktKEip7N8k6z5vc0yT7nrh') is False
+        assert _is_wiki_url('WpK2wAcV8i6P8tke8X9cLcmDnSh') is False
+        assert _is_wiki_url('') is False
+
+    def test_obj_type_missing_error_detection(self):
+        from feishu_server import _is_obj_type_missing_error
+        assert _is_obj_type_missing_error({'error': '--obj-type is required for a raw obj_token'}) is True
+        assert _is_obj_type_missing_error({'error': 'something about raw obj_token'}) is True
+        assert _is_obj_type_missing_error({'error': 'permission denied'}) is False
+        assert _is_obj_type_missing_error({'ok': True}) is False
+        assert _is_obj_type_missing_error({}) is False
+
+
+class TestWikiStatusContract:
+    """v5.10.2: discover_sub_documents 必须透传 wiki_status / wiki_debug"""
+
+    def test_falls_back_to_cite_only_on_wiki_error(self, monkeypatch):
+        from feishu_server import discover_sub_documents
+
+        # Mock wiki API to return error → should fall through to cite
+        monkeypatch.setattr('feishu_server.discover_via_wiki_api',
+                            lambda x: {'error': 'boom', 'wiki_status': 'error', 'wiki_debug': {}})
+        # Mock run_lark_cli to return cite content
+        monkeypatch.setattr('feishu_server.run_lark_cli',
+                            lambda x: {'data': {'document': {'content': '', 'document_id': 'd1'}}})
+        result = discover_sub_documents('WpK2w', auto_find_root=False)
+        assert result['source'] == 'cite_fallback'
+        assert result['wiki_status'] == 'error'
+        assert result['articles'] == []
+
+    def test_no_children_does_not_fall_through(self, monkeypatch):
+        from feishu_server import discover_sub_documents
+
+        # Mock wiki API: reachable, has_child=false, no children
+        monkeypatch.setattr('feishu_server.discover_via_wiki_api',
+                            lambda x: {
+                                'title': 'X', 'articles': [], 'source': 'wiki_api',
+                                'wiki_status': 'no-children',
+                                'wiki_debug': {'has_child': False},
+                            })
+        # Mock run_lark_cli to return something that would normally produce cite results
+        called = {'count': 0}
+        def fake_lark(t):
+            called['count'] += 1
+            return {'data': {'document': {'content': '<cite doc-id="Y"></cite>', 'document_id': 'd2'}}}
+        monkeypatch.setattr('feishu_server.run_lark_cli', fake_lark)
+
+        result = discover_sub_documents('WpK2w', auto_find_root=False)
+        # Should NOT call run_lark_cli at all (no fall-through)
+        assert called['count'] == 0, 'should not fall through to cite parsing when wiki API confirms no children'
+        assert result['source'] == 'wiki_api'
+        assert result['wiki_status'] == 'no-children'
+        assert result['articles'] == []

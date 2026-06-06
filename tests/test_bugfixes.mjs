@@ -258,3 +258,104 @@ test('v5.10.1: empty articles result is marked as count=0 (not error)', async ()
   // The click handler can use this to show "没有子文档"
   assert.ok(r.response !== undefined);
 });
+
+// ============================================================
+// v5.10.2 contract: server now reports wiki_status and
+// wiki_debug in the response. discoverChildrenOf surfaces it
+// in result.response so the UI can tell the user WHY empty.
+// ============================================================
+test('v5.10.2: response with wiki_status="no-children" propagates to UI', async () => {
+  const state = makeTreeState();
+  const resp = {
+    articles: [],
+    title: 'T0 doc',
+    wiki_status: 'no-children',
+    wiki_debug: { has_child: false, node_list_raw: null },
+    source: 'wiki_api',
+  };
+  const r = await discoverChildrenOfContract(state, 0, async () => resp);
+  assert.equal(r.ok, true);
+  assert.equal(r.count, 0);
+  assert.equal(r.response.wiki_status, 'no-children');
+  assert.equal(r.response.wiki_debug.has_child, false);
+  // The UI would now show: "T0 doc 没有子文档 (wiki_status=no-children)"
+});
+
+test('v5.10.2: response with wiki_status="list-empty" is distinguishable from "no-children"', async () => {
+  const state = makeTreeState();
+  const resp = {
+    articles: [],
+    title: 'X',
+    wiki_status: 'list-empty',  // has_child=true but +node-list returned 0
+    wiki_debug: { has_child: true, nodes_count: 0 },
+    source: 'wiki_api',
+  };
+  const r = await discoverChildrenOfContract(state, 0, async () => resp);
+  assert.equal(r.ok, true);
+  assert.equal(r.count, 0);
+  assert.equal(r.response.wiki_status, 'list-empty');
+});
+
+test('v5.10.2: wiki_status="error" surfaces in the api-error path', async () => {
+  const state = makeTreeState();
+  const resp = {
+    error: 'lark-cli failed: ...',
+    wiki_status: 'error',
+    wiki_debug: { step: 'node-list' },
+    source: 'wiki_api',
+  };
+  const r = await discoverChildrenOfContract(state, 0, async () => resp);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'api-error');
+  assert.equal(r.response.wiki_status, 'error');
+});
+
+// ============================================================
+// v5.10.2 contract: discover_sub_documents no longer blind-
+// falls-through to <cite> parsing when wiki API is reachable
+// but reports no children.
+// ============================================================
+
+// Mirror of the new server logic (kept in lock-step with
+// feishu_server.py:discover_sub_documents).
+function discoverSubDocsContract(wikiResult) {
+  if (wikiResult.error) {
+    return { used_strategy: 'cite_fallback', reason: 'wiki-api-error' };
+  }
+  if (wikiResult.articles && wikiResult.articles.length > 0) {
+    return { used_strategy: 'wiki_api', articles: wikiResult.articles };
+  }
+  // wiki API reachable, no articles → DO NOT fall through
+  return {
+    used_strategy: 'wiki_api',
+    articles: [],
+    wiki_status: wikiResult.wiki_status,
+  };
+}
+
+test('v5.10.2: wiki API ok with children → use wiki_api (no fall-through)', () => {
+  const r = discoverSubDocsContract({ articles: [{ title: 'a' }], wiki_status: 'ok' });
+  assert.equal(r.used_strategy, 'wiki_api');
+  assert.equal(r.articles.length, 1);
+});
+
+test('v5.10.2: wiki API reachable but no-children → DO NOT fall through', () => {
+  // The old code blindly fell through to <cite> parse here.
+  // The new code stops and reports wiki_status=no-children.
+  const r = discoverSubDocsContract({ articles: [], wiki_status: 'no-children' });
+  assert.equal(r.used_strategy, 'wiki_api');
+  assert.equal(r.articles.length, 0);
+  assert.equal(r.wiki_status, 'no-children');
+});
+
+test('v5.10.2: wiki API error → fall through to cite parsing', () => {
+  const r = discoverSubDocsContract({ error: 'permission denied', wiki_status: 'error' });
+  assert.equal(r.used_strategy, 'cite_fallback');
+  assert.equal(r.reason, 'wiki-api-error');
+});
+
+test('v5.10.2: wiki API list-empty → DO NOT fall through', () => {
+  const r = discoverSubDocsContract({ articles: [], wiki_status: 'list-empty' });
+  assert.equal(r.used_strategy, 'wiki_api');
+  assert.equal(r.wiki_status, 'list-empty');
+});
