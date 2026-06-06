@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "飞书文档爬取助手",
-  "version": "5.7.0",
-  "description": "爬取飞书文档内容并保存为本地 Markdown 文件 v5.7 (重试+限流+搜索)",
+  "version": "5.8.0",
+  "description": "爬取飞书文档内容并保存为本地 Markdown 文件 v5.8 (树形+重试+限流+搜索)",
   "permissions": [
     "activeTab",
     "storage"

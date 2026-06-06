@@ -1,7 +1,15 @@
-// popup.js — 飞书文档爬取助手 v5.7
+// popup.js — 飞书文档爬取助手 v5.8
+// v5.8: 树形展示 — 父节点可展开/折叠子文档，可"展开/折叠全部"
 // v5.7: 弹窗搜索/筛选 — 实时过滤 + selectedSet 跨筛选保持
 // v5.6: 爬取并发化 — 文章池并发 + 文章内图片并发 + 原子文件名分配
 // v5.4: 修复目录持久化 — 分离恢复显示与重新授权
+
+import {
+  computeVisible,
+  getParentIndices,
+  allExpanded,
+  insertChildrenAfter,
+} from './tree.js';
 
 const API_BASE = 'http://127.0.0.1:8765';
 
@@ -110,6 +118,10 @@ let okCount = 0, failCount = 0;
 let searchQuery = '';
 let selectedSet = new Set();         // indices of checked articles (survives filter changes)
 
+// Tree state (v5.8)
+let expandedSet = new Set();         // parent indices whose children are visible
+let childrenLoaded = new Set();      // parent indices whose children have been discovered
+
 // DOM refs
 const $loading = document.getElementById('status-loading');
 const $ready = document.getElementById('status-ready');
@@ -180,44 +192,93 @@ async function callApi(endpoint, body) {
 }
 
 // ============================================================
-// 文章列表
+// 文章列表（v5.8 树形）
 // ============================================================
 function renderArticles() {
+  const visible = computeVisible(articles, expandedSet, searchQuery);
+  const total = articles.length;
   const q = (searchQuery || '').trim().toLowerCase();
-  const matches = (a) => !q || (a.title || '').toLowerCase().includes(q);
-  const visibleIndices = [];
-  for (let i = 0; i < articles.length; i++) {
-    if (matches(articles[i])) visibleIndices.push(i);
-  }
 
   $articleCount.textContent = q
-    ? `${selectedSet.size} / ${visibleIndices.length} / ${articles.length}`
-    : `${selectedSet.size} / ${articles.length}`;
-  $filterStatus.textContent = q ? `匹配 ${visibleIndices.length}` : '';
+    ? `${selectedSet.size} / ${visible.length} / ${total}`
+    : `${selectedSet.size} / ${total}`;
+  $filterStatus.textContent = q ? `匹配 ${visible.length}` : '';
 
-  if (articles.length === 0) {
+  if (total === 0) {
     $articleList.innerHTML = '<div class="no-articles">未发现子文章</div>';
+    updateTreeButton();
     return;
   }
-
-  if (visibleIndices.length === 0) {
+  if (visible.length === 0) {
     $articleList.innerHTML = `<div class="no-articles">无匹配项 "${escapeHtml(q)}"</div>`;
+    updateTreeButton();
     return;
   }
 
-  $articleList.innerHTML = visibleIndices.map(i => {
+  $articleList.innerHTML = visible.map(({ index: i, depth }) => {
     const a = articles[i];
     const token = a.doc_token || a.token || '';
     const tokenShort = token ? token.substring(0, 12) : 'NO-TOKEN';
     const checked = selectedSet.has(i) ? 'checked' : '';
+    const isParent = !!a.has_child;
+    const isExpanded = expandedSet.has(i);
+    const caret = isParent
+      ? `<span class="tree-caret" data-toggle="${i}">${isExpanded ? '▼' : '▶'}</span>`
+      : `<span class="tree-caret placeholder">·</span>`;
+    const indent = depth * 16;
     return `
-    <label class="article-item" title="Token: ${token}">
+    <label class="article-item" title="Token: ${token}" style="padding-left: ${8 + indent}px">
       <input type="checkbox" data-idx="${i}" ${checked}>
-      <span class="type-badge">${a.has_child ? '📁' : '📄'}</span>
+      ${caret}
+      <span class="type-badge">${isParent ? '📁' : '📄'}</span>
       <span class="article-title">${escapeHtml(a.title)}</span>
       <span class="token-hint">${tokenShort}</span>
     </label>`;
   }).join('');
+
+  updateTreeButton();
+}
+
+function updateTreeButton() {
+  const $btn = document.getElementById('btn-tree-toggle');
+  const parents = getParentIndices(articles);
+  if (parents.length === 0) {
+    $btn.classList.add('hidden');
+    return;
+  }
+  $btn.classList.remove('hidden');
+  $btn.textContent = allExpanded(articles, expandedSet) ? '📂 折叠' : '📂 展开';
+}
+
+async function discoverChildrenOf(parentIdx) {
+  const parent = articles[parentIdx];
+  if (!parent || !parent.has_child || childrenLoaded.has(parentIdx)) return [];
+  const token = parent.doc_token || parent.token;
+  if (!token) return [];
+  try {
+    const result = await callApi('/discover', { token });
+    const children = (result && result.articles) || [];
+    if (children.length === 0) {
+      childrenLoaded.add(parentIdx);
+      return [];
+    }
+    articles = insertChildrenAfter(articles, parentIdx, children);
+    childrenLoaded.add(parentIdx);
+    return children.length;
+  } catch (e) {
+    console.warn(`[Tree] discover children of "${parent.title}" failed:`, e.message);
+    return [];
+  }
+}
+
+async function discoverAllUnloaded() {
+  const unloaded = [];
+  for (let i = 0; i < articles.length; i++) {
+    if (articles[i].has_child && !childrenLoaded.has(i)) unloaded.push(i);
+  }
+  if (unloaded.length === 0) return 0;
+  const counts = await Promise.all(unloaded.map(idx => discoverChildrenOf(idx)));
+  return counts.reduce((a, b) => a + b, 0);
 }
 
 function getSelectedIndices() {
@@ -349,11 +410,17 @@ async function init() {
     if (articles.length === 0) {
       articles = [{ title: pageTitle || '当前页面', token: extractTokenFromUrl(originalUrl), url: originalUrl }];
     }
+    // Tag top-level articles (parentIndex = -1) for tree view
+    for (const a of articles) {
+      if (typeof a.parentIndex !== 'number') a.parentIndex = -1;
+    }
 
-    // Reset search & selection state on each init
+    // Reset search & selection & tree state on each init
     searchQuery = '';
     $searchInput.value = '';
     selectedSet = new Set(articles.map((_, i) => i));  // all selected by default
+    expandedSet = new Set();
+    childrenLoaded = new Set();
 
     renderArticles();
 
@@ -496,6 +563,39 @@ $searchInput.addEventListener('input', e => {
   renderArticles();
 });
 
+// Tree: per-item caret click (toggle expand/collapse for one parent)
+$articleList.addEventListener('click', e => {
+  const caret = e.target.closest('.tree-caret');
+  if (!caret || !caret.dataset.toggle) return;
+  e.preventDefault();
+  const idx = parseInt(caret.dataset.toggle);
+  if (expandedSet.has(idx)) {
+    expandedSet.delete(idx);
+    renderArticles();
+  } else {
+    discoverChildrenOf(idx).then(n => {
+      if (n > 0 || childrenLoaded.has(idx)) {
+        expandedSet.add(idx);
+        renderArticles();
+      }
+    });
+  }
+});
+
+// Tree: "展开/折叠全部" button
+document.getElementById('btn-tree-toggle').addEventListener('click', async () => {
+  const parents = getParentIndices(articles);
+  if (parents.length === 0) return;
+  if (allExpanded(articles, expandedSet)) {
+    for (const i of parents) expandedSet.delete(i);
+    renderArticles();
+  } else {
+    await discoverAllUnloaded();
+    for (const i of parents) expandedSet.add(i);
+    renderArticles();
+  }
+});
+
 // ============================================================
 // 并发原语
 // ============================================================
@@ -596,6 +696,20 @@ $btnStart.addEventListener('click', async () => {
   if (!dirHandle || !folderName) return alert('请先选择保存文件夹');
   if (crawlInProgress) return;
 
+  // 自动发现未展开的父节点的子文档（保持 v5.7 行为：点 Start 即可爬全部）
+  const beforeCount = articles.length;
+  const newChildrenCount = await discoverAllUnloaded();
+  if (newChildrenCount > 0) {
+    // 把新发现的父节点和子文档都加入选择（用户没在树视图里勾选过它们）
+    for (let i = 0; i < articles.length; i++) {
+      if (articles[i].has_child) selectedSet.add(i);
+    }
+    for (let i = beforeCount; i < articles.length; i++) {
+      selectedSet.add(i);
+    }
+    renderArticles();
+  }
+
   const selected = getSelectedIndices();
   if (selected.length === 0) return alert('请至少选择一个章节');
 
@@ -624,24 +738,6 @@ $btnStart.addEventListener('click', async () => {
     return a;
   });
 
-  // 并行展开带子文档的父节点
-  console.log(`[Crawler] Checking ${targets.length} targets for children...`);
-  const parentTargets = targets.filter(t => t.has_child);
-  if (parentTargets.length > 0) {
-    $crawlStats.textContent = `正在发现 ${parentTargets.length} 个父节点的子文档...`;
-    const childResults = await Promise.all(
-      parentTargets.map(t =>
-        callApi('/discover', { token: t.doc_token || t.token })
-          .then(r => r.articles || [])
-          .catch(e => { console.warn(`[Crawler] Child discover failed: ${t.title}`, e.message); return []; })
-      )
-    );
-    let addedCount = 0;
-    for (const arr of childResults) {
-      for (const child of arr) { targets.push(child); addedCount++; }
-    }
-    console.log(`[Crawler] Total targets after expansion: ${targets.length} (added ${addedCount} children)`);
-  }
   const total = targets.length;
   const okFiles = [], failFiles = [];
 
