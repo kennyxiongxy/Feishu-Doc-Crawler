@@ -156,26 +156,25 @@ def run_wiki_node_list(lark_cli, run_lark_cli_raw, space_id, parent_token):
     v5.10.2: 同样在缺 --obj-type 时自动重试. 这里 parent_token
     必须是 +node-get 返回的 node_token (不能用 obj_token 也不能是 URL).
 
-    默认 +node-list 只返回单页（最多 50 条），加 --page-all 翻遍全部页，
-    --page-limit 0 表示不限制页数。
+    默认 +node-list 返回单页（最多 50 条）。之前尝试过 --page-all --page-limit 0，
+    但实际运行中出现只返回一条/一页的问题，因此先恢复为单页获取；后续如需
+    超过 50 条再实现手动翻页。
     """
     cmd = [
         lark_cli, 'wiki', '+node-list',
         '--space-id', space_id,
         '--parent-node-token', parent_token,
         '--as', 'user',
-        '--format', 'json',
-        '--page-all',
-        '--page-limit', '0',
+        '--format', 'json'
     ]
-    result = run_lark_cli_raw(lark_cli, cmd, timeout=60)
+    result = run_lark_cli_raw(lark_cli, cmd, timeout=15)
     if result.get('ok'):
         return result
     if not _is_obj_type_missing_error(result):
         return result
     _wiki_log('wiki_api: node-list 缺 --obj-type, 重试加 --obj-type docx')
     cmd2 = list(cmd) + ['--obj-type', 'docx']
-    return run_lark_cli_raw(lark_cli, cmd2, timeout=60)
+    return run_lark_cli_raw(lark_cli, cmd2, timeout=15)
 
 
 def _wiki_log(msg):
