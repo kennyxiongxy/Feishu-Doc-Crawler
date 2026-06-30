@@ -233,13 +233,35 @@ async function toggleTheme() {
 // ============================================================
 // API 调用
 // ============================================================
+// Live lark-cli status from /health (path/version/version_ok/min_version)
+let larkCliStatus = null;
+
 async function checkServer() {
   try {
     const resp = await fetch(`${CONFIG.apiBase}/health`, { method: 'GET', signal: abortTimeout(3000) });
-    if (resp.ok) { const data = await resp.json(); if (data.status === 'ok') { serverAvailable = true; return true; } }
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.status === 'ok') {
+        serverAvailable = true;
+        larkCliStatus = data.lark_cli || null;
+        return true;
+      }
+    }
   } catch (e) { console.log('[Popup] Server check failed:', e.message); }
   serverAvailable = false;
+  larkCliStatus = null;
   return false;
+}
+
+function getLarkCliWarning() {
+  if (!larkCliStatus) return '';
+  if (!larkCliStatus.version) {
+    return `（未检测到 lark-cli 版本，请执行：lark-cli auth login）`;
+  }
+  if (!larkCliStatus.version_ok) {
+    return `（lark-cli ${larkCliStatus.version} 版本过低，建议升级：lark-cli update）`;
+  }
+  return '';
 }
 
 async function callApi(endpoint, body) {
@@ -495,8 +517,9 @@ async function init() {
 
     // 检查服务器
     const serverOk = await checkServer();
+    const larkWarning = getLarkCliWarning();
     $serverStatus.innerHTML = serverOk
-      ? '<span class="server-ok">● API 服务就绪</span>'
+      ? `<span class="server-ok">● API 服务就绪</span>${larkWarning ? `<br><span class="server-err" style="font-size:11px">${larkWarning}</span>` : ''}`
       : '<span class="server-err">● API 服务未启动，使用 DOM 模式</span>';
 
     let apiArticles = [];
@@ -569,8 +592,9 @@ async function init() {
 
     updateStartButton();
 
+    const finalLarkWarning = getLarkCliWarning();
     $serverStatus.innerHTML = serverOk
-      ? `<span class="server-ok">● API 服务就绪（${articles.length} 篇）</span>`
+      ? `<span class="server-ok">● API 服务就绪（${articles.length} 篇）</span>${finalLarkWarning ? `<br><span class="server-err" style="font-size:11px">${finalLarkWarning}</span>` : ''}`
       : '<span class="server-err">● API 服务未启动</span>';
 
   } catch (err) {

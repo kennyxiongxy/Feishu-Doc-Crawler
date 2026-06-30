@@ -854,3 +854,37 @@ class TestWikiStatusContract:
         assert result['source'] == 'wiki_api'
         assert result['wiki_status'] == 'no-children'
         assert result['articles'] == []
+
+
+class TestLarkCliVersion:
+    """lark-cli 版本解析与校验（02 优化项）"""
+
+    def test_parse_version_standard(self, server_module):
+        assert server_module.parse_lark_cli_version('1.0.53') == (1, 0, 53)
+
+    def test_parse_version_with_prefix(self, server_module):
+        assert server_module.parse_lark_cli_version('lark-cli version 1.0.48') == (1, 0, 48)
+
+    def test_parse_version_none(self, server_module):
+        assert server_module.parse_lark_cli_version(None) is None
+
+    def test_parse_version_empty(self, server_module):
+        assert server_module.parse_lark_cli_version('') is None
+
+    def test_parse_version_no_numbers(self, server_module):
+        assert server_module.parse_lark_cli_version('unknown') is None
+
+    def test_version_ok_meets_min(self, server_module):
+        assert server_module.is_lark_cli_version_ok((1, 0, 48)) is True
+
+    def test_version_ok_above_min(self, server_module):
+        assert server_module.is_lark_cli_version_ok((1, 1, 0)) is True
+
+    def test_version_ok_below_min(self, server_module):
+        assert server_module.is_lark_cli_version_ok((1, 0, 47)) is False
+
+    def test_version_ok_none(self, server_module):
+        assert server_module.is_lark_cli_version_ok(None) is False
+
+    def test_min_version_constant(self, server_module):
+        assert server_module.LARK_CLI_MIN_VERSION == (1, 0, 48)

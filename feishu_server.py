@@ -109,6 +109,40 @@ def resolve_lark_cli_path():
 
 LARK_CLI = resolve_lark_cli_path()
 
+
+LARK_CLI_MIN_VERSION = (1, 0, 48)
+
+
+def parse_lark_cli_version(output):
+    """从 lark-cli --version 输出解析版本元组，例如 '1.0.53' -> (1, 0, 53)"""
+    if not output:
+        return None
+    m = re.search(r'(\d+)\.(\d+)\.(\d+)', output)
+    if not m:
+        return None
+    return tuple(int(x) for x in m.groups())
+
+
+def get_lark_cli_version():
+    """获取 lark-cli 版本，失败返回 None。"""
+    try:
+        result = subprocess.run(
+            [LARK_CLI, '--version'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return parse_lark_cli_version(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def is_lark_cli_version_ok(version_tuple):
+    """检查 lark-cli 版本是否满足最低要求。"""
+    if not version_tuple:
+        return False
+    return version_tuple >= LARK_CLI_MIN_VERSION
+
 # 空间 -> 根页面 token 缓存（持久化到文件）
 import threading
 import time
@@ -973,7 +1007,17 @@ class FeishuHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/health':
-            self._send_json({'status': 'ok', 'service': 'feishu-crawler-server'})
+            lark_version = get_lark_cli_version()
+            self._send_json({
+                'status': 'ok',
+                'service': 'feishu-crawler-server',
+                'lark_cli': {
+                    'path': LARK_CLI,
+                    'version': '.'.join(str(x) for x in lark_version) if lark_version else None,
+                    'version_ok': is_lark_cli_version_ok(lark_version),
+                    'min_version': '.'.join(str(x) for x in LARK_CLI_MIN_VERSION),
+                }
+            })
         elif self.path.startswith('/ping'):
             try:
                 result = subprocess.run([LARK_CLI, '--version'], capture_output=True, text=True, timeout=5)
