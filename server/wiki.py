@@ -237,6 +237,78 @@ def discover_via_wiki_api(lark_cli, run_lark_cli_raw, token_or_url):
     has_child = node.get('has_child', False)
     space_id = node.get('space_id', '')
     title = node.get('title', '')
+    parent_node_token = node.get('parent_node_token', '')
+
+    if not space_id:
+        return {
+            'error': 'No space_id found',
+            'source': 'wiki_api',
+            'wiki_status': 'error',
+            'wiki_debug': {'node_get_raw': node_data, 'step': 'no-space-id'},
+        }
+
+    # Step 2: 取当前节点下的子文档；如果当前节点没有子文档且是空间根节点
+    # （parent_node_token 为空），则退一步列出该空间下所有根节点作为同级目录。
+    # 这种 Wiki 空间的顶层文档本身没有子节点，用户打开其中一篇时期望看到全部章节。
+    if not has_child and parent_node_token == '':
+        _wiki_log(f'wiki_api: current node has no children and is root-level, '
+                  f'listing root nodes of space {space_id[:16]}...')
+        list_data = run_wiki_node_list(lark_cli, run_lark_cli_raw, space_id, '')
+
+        if 'error' in list_data:
+            _wiki_log(f'wiki_api: root node-list failed: {list_data["error"][:100]}')
+            return {
+                'error': list_data['error'],
+                'source': 'wiki_api',
+                'wiki_status': 'error',
+                'wiki_debug': {'node_get_raw': node_data, 'node_list_raw': list_data,
+                               'has_child': False, 'step': 'root-node-list'},
+            }
+
+        if not list_data.get('ok'):
+            return {
+                'error': 'Wiki root node-list API returned not ok',
+                'source': 'wiki_api',
+                'wiki_status': 'error',
+                'wiki_debug': {'node_get_raw': node_data, 'node_list_raw': list_data,
+                               'has_child': False, 'step': 'root-node-list-ok'},
+            }
+
+        raw_data = list_data.get('data', {}) or {}
+        nodes = (raw_data.get('nodes')
+                 or raw_data.get('items')
+                 or raw_data.get('children')
+                 or raw_data.get('list')
+                 or [])
+        _wiki_log(f'wiki_api: root +node-list returned {len(nodes)} nodes')
+
+        articles = []
+        for n in nodes:
+            node_token = n.get('node_token') or n.get('token') or ''
+            if not node_token:
+                continue
+            # 根节点平铺列出，标记 has_child=false 避免前端再次展开时递归列出同级
+            articles.append({
+                'title': n.get('title', ''),
+                'doc_token': node_token,
+                'url': f'https://internal.feishu.cn/wiki/{node_token}',
+                'has_child': False,
+                'obj_token': n.get('obj_token', ''),
+            })
+
+        status = 'ok' if articles else 'list-empty'
+        _wiki_log(f'wiki_api: status={status} found {len(articles)} root nodes')
+        return {
+            'title': title,
+            'space_id': space_id,
+            'page_token': token,
+            'articles': articles,
+            'source': 'wiki_api',
+            'wiki_status': status,
+            'wiki_debug': {'node_get_raw': node_data, 'node_list_raw': list_data,
+                           'has_child': False, 'is_space_root': True,
+                           'nodes_count': len(nodes), 'articles_count': len(articles)},
+        }
 
     if not has_child:
         _wiki_log(f'wiki_api: has_child=false for {token[:16]} (no children per API)')
@@ -247,15 +319,7 @@ def discover_via_wiki_api(lark_cli, run_lark_cli_raw, token_or_url):
                            'space_id': space_id, 'node_list_raw': None},
         }
 
-    if not space_id:
-        return {
-            'error': 'No space_id found',
-            'source': 'wiki_api',
-            'wiki_status': 'error',
-            'wiki_debug': {'node_get_raw': node_data, 'step': 'no-space-id'},
-        }
-
-    # Step 2: List all children
+    # Step 3: List all children of the current node
     _wiki_log(f'wiki_api: listing children of {token[:16]} (space={space_id[:16]}...)')
     list_data = run_wiki_node_list(lark_cli, run_lark_cli_raw, space_id, token)
 
