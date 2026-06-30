@@ -39,11 +39,16 @@ _load_cache()
 
 
 def get_space_key(url):
-    """从 URL 提取空间 key（子域名）"""
+    """从 URL 提取空间 key（子域名）
+
+    支持 feishu.cn 与 larkoffice.com 两类域名：
+      - https://xxx.feishu.cn/...      -> xxx
+      - https://xxx.larkoffice.com/... -> xxx
+    """
     parsed = urlparse(url)
     host = parsed.hostname or ''
     parts = host.split('.')
-    if len(parts) >= 3 and parts[1] == 'feishu':
+    if len(parts) >= 3 and parts[1] in ('feishu', 'larkoffice'):
         return parts[0]
     return host
 

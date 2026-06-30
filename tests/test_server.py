@@ -266,6 +266,9 @@ class TestGetSpaceKey:
         url = "https://test.feishu.cn/wiki/abc"
         assert server_module.get_space_key(url) == "test"
 
+    def test_larkoffice_subdomain(self, server_module):
+        assert server_module.get_space_key("https://bytedance.larkoffice.com/wiki/xxx") == "bytedance"
+
     def test_localhost(self, server_module):
         # Should return hostname as-is for non-feishu hosts
         assert server_module.get_space_key("http://127.0.0.1:8765/health") == "127.0.0.1"

@@ -509,7 +509,7 @@ async function init() {
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !tab.url || !tab.url.includes('feishu.cn')) {
+    if (!tab || !tab.url || (!tab.url.includes('feishu.cn') && !tab.url.includes('larkoffice.com'))) {
       showError('请在飞书文档页面使用此插件');
       return;
     }
