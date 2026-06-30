@@ -625,8 +625,13 @@ function updateStartButton() {
   // 需要：至少选一篇文章 + 有文件夹名 + dirHandle 可用（不处于待授权状态）
   const hasDir = dirHandle && !needsReauth && folderName;
   $btnStart.disabled = (sel.length === 0) || !hasDir;
-  if (!hasDir && folderName && needsReauth) {
-    $btnStart.title = '请先点击"选择文件夹"重新授权';
+
+  if (sel.length === 0) {
+    $btnStart.title = '请至少选择一篇文章';
+  } else if (!folderName) {
+    $btnStart.title = '请先点击左侧「选择文件夹」';
+  } else if (needsReauth) {
+    $btnStart.title = '请先点击「选择文件夹」重新授权';
   } else {
     $btnStart.title = '';
   }
