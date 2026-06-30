@@ -20,7 +20,23 @@ import {
   themeButtonLabel,
 } from './theme.js';
 
-const API_BASE = 'http://127.0.0.1:8765';
+// 可配置项：默认值 + 允许从 chrome.storage.local 覆盖
+const CONFIG = {
+  apiBase: 'http://127.0.0.1:8765',
+  maxArticleConcurrency: 3,
+  maxImageConcurrency: 2,
+};
+
+// 脚本加载时立即尝试读取用户自定义配置
+(async function loadRuntimeConfig() {
+  try {
+    const stored = await chrome.storage.local.get(['apiBase']);
+    if (stored.apiBase) CONFIG.apiBase = stored.apiBase;
+    console.log('[Popup] API base:', CONFIG.apiBase);
+  } catch (e) {
+    console.warn('[Popup] Failed to load runtime config:', e.message);
+  }
+})();
 
 // ============================================================
 // IndexedDB 持久化目录句柄
@@ -115,9 +131,9 @@ let originalUrl = '';
 let serverAvailable = false;
 let needsReauth = false;  // true 表示有已保存的句柄但需要用户手势重新授权
 
-// Concurrency tuning
-const MAX_ARTICLE_CONCURRENCY = 3;   // parallel articles (each holds 1 lark-cli call)
-const MAX_IMAGE_CONCURRENCY = 2;     // parallel image downloads per article
+// Concurrency tuning (now centralized in CONFIG)
+const MAX_ARTICLE_CONCURRENCY = CONFIG.maxArticleConcurrency;
+const MAX_IMAGE_CONCURRENCY = CONFIG.maxImageConcurrency;
 
 // Live crawl counters (shared across workers — safe in single-threaded JS)
 let inFlightTitles = new Set();      // article titles currently being processed
@@ -219,7 +235,7 @@ async function toggleTheme() {
 // ============================================================
 async function checkServer() {
   try {
-    const resp = await fetch(`${API_BASE}/health`, { method: 'GET', signal: abortTimeout(3000) });
+    const resp = await fetch(`${CONFIG.apiBase}/health`, { method: 'GET', signal: abortTimeout(3000) });
     if (resp.ok) { const data = await resp.json(); if (data.status === 'ok') { serverAvailable = true; return true; } }
   } catch (e) { console.log('[Popup] Server check failed:', e.message); }
   serverAvailable = false;
@@ -228,7 +244,7 @@ async function checkServer() {
 
 async function callApi(endpoint, body) {
   console.log(`[Popup] API ${endpoint} <-`, JSON.stringify(body).substring(0, 80));
-  const resp = await fetch(`${API_BASE}${endpoint}`, {
+  const resp = await fetch(`${CONFIG.apiBase}${endpoint}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

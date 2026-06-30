@@ -18,6 +18,7 @@ import subprocess
 import sys
 import os
 import platform
+import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 import argparse
@@ -84,7 +85,29 @@ def clean_rich_text_in_markdown(content):
     return '\n'.join(result_lines)
 
 
-LARK_CLI = '/opt/homebrew/bin/lark-cli'
+def resolve_lark_cli_path():
+    """自动检测 lark-cli 路径。
+
+    优先级:
+      1) LARK_CLI 环境变量
+      2) shutil.which('lark-cli')
+      3) 常见 Homebrew 路径
+      4) 保留原默认路径，便于产生可识别的错误信息
+    """
+    candidates = [
+        os.environ.get('LARK_CLI'),
+        shutil.which('lark-cli'),
+        '/opt/homebrew/bin/lark-cli',
+        '/usr/local/bin/lark-cli',
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    # 兜底：返回原默认值，让后续调用给出清晰的 "file not found" 错误
+    return '/opt/homebrew/bin/lark-cli'
+
+
+LARK_CLI = resolve_lark_cli_path()
 
 # 空间 -> 根页面 token 缓存（持久化到文件）
 import threading
@@ -251,7 +274,7 @@ def run_lark_cli_limited(fn, *args, **kwargs):
         return with_retry(fn, *args, **kwargs)
 
 
-PORT = 8765
+PORT = int(os.environ.get('FEISHU_CRAWLER_PORT', 8765))
 
 
 def extract_token_from_url(url):
@@ -1101,6 +1124,7 @@ def main():
     server = ThreadingHTTPServer(('127.0.0.1', PORT), FeishuHandler)
     print(f'🚀 飞书文档爬取 API 服务已启动')
     print(f'   地址: http://127.0.0.1:{PORT}')
+    print(f'   lark-cli: {LARK_CLI}')
     print(f'   /discover - 发现子文档列表')
     print(f'   /extract  - 提取单个文档内容')
     print(f'   健康检查: http://127.0.0.1:{PORT}/health')
