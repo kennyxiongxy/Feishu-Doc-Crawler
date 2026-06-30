@@ -37,6 +37,7 @@ def is_retryable_failure(err_str):
       - subprocess/timeout/JSON parse errors → retry (network glitch)
       - code < 100 → retry (server-side transient)
       - known permanent codes → no retry
+      - auth/permission errors → no retry
       - unparseable → retry (safer default)
     """
     if not err_str:
@@ -50,6 +51,12 @@ def is_retryable_failure(err_str):
         return True
     if 'connection' in s or 'network' in s:
         return True
+    # Auth/permission failures: retrying won't help until user re-authenticates
+    if any(marker in s for marker in (
+        'token_missing', 'need_user_authorization', 'unauthorized',
+        'token expired', 'invalid access token', 'no permission',
+    )):
+        return False
     code = _extract_lark_code(err_str)
     if code is None:
         return True
