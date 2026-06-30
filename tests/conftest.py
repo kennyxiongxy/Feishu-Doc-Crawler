@@ -1,5 +1,4 @@
 """Shared fixtures for feishu_server tests."""
-import importlib.util
 import shutil
 import sys
 from pathlib import Path
@@ -7,7 +6,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-SERVER_PATH = ROOT / "feishu_server.py"
+SERVER_PATH = ROOT / "server"
 
 sys.dont_write_bytecode = True
 
@@ -22,7 +21,7 @@ def pytest_sessionfinish(session, exitstatus):
     root when it imports the single-file server module. Clean them up
     so reloading the extension never trips on leftover bytecode.
     """
-    for cache_dir in (ROOT, ROOT / "tests"):
+    for cache_dir in (ROOT, ROOT / "tests", ROOT / "server"):
         for name in ("__pycache__", ".pytest_cache"):
             target = cache_dir / name
             if target.is_dir():
@@ -31,15 +30,21 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.fixture(scope="module")
 def server_module():
-    """Import feishu_server.py as a module and reload it for isolation.
+    """Import the feishu_server compatibility entry point and reload it.
 
-    The server is a single-file script (no package), so we use importlib
-    to load it by file path. We also clean it out of sys.modules first
-    to guarantee a fresh import per test module.
+    feishu_server.py re-exports the split server/ package API so that
+    existing tests keep working without being rewritten. We reload the
+    entry point (and any cached server sub-modules) so each test module
+    gets a fresh import.
     """
-    if "feishu_server" in sys.modules:
-        del sys.modules["feishu_server"]
-    spec = importlib.util.spec_from_file_location("feishu_server", SERVER_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    # Make sure project root is importable
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
+    # Remove any cached server modules so the import is fresh
+    for name in list(sys.modules.keys()):
+        if name == "feishu_server" or name == "server" or name.startswith("server."):
+            del sys.modules[name]
+
+    import feishu_server
+    return feishu_server

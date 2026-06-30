@@ -4,9 +4,7 @@ These tests cover the text-processing pipeline that runs on every
 crawled document. No subprocess / network calls — only pure functions.
 """
 import os
-import tempfile
 
-import pytest
 
 # All tests use the `server_module` fixture from conftest.py
 # which loads feishu_server.py by file path.
@@ -512,8 +510,7 @@ class TestWithRetry:
 class TestLarkCliLimiter:
     def test_semaphore_limits_concurrent_calls(self, server_module):
         import threading
-        sem = server_module._lark_cli_semaphore
-        # Sanity: this is a Semaphore(3) object with internal counter
+        # Sanity: _lark_cli_semaphore is a Semaphore(3) object with internal counter
         # We can't easily check the exact limit value, but we can verify
         # run_lark_cli_limited respects concurrency.
         active = 0
@@ -543,7 +540,6 @@ class TestLarkCliLimiter:
 
     def test_run_lark_cli_limited_uses_retry(self, server_module, monkeypatch):
         # Stub out the semaphore & retry internals to count attempts
-        import feishu_server as fs
         calls = []
 
         def stub():
@@ -821,11 +817,19 @@ class TestWikiStatusContract:
         from feishu_server import discover_sub_documents
 
         # Mock wiki API to return error → should fall through to cite
-        monkeypatch.setattr('feishu_server.discover_via_wiki_api',
-                            lambda x: {'error': 'boom', 'wiki_status': 'error', 'wiki_debug': {}})
+        monkeypatch.setattr(
+            'server.wiki.discover_via_wiki_api',
+            lambda lark_cli, run_lark_cli_raw, token_or_url: {
+                'error': 'boom', 'wiki_status': 'error', 'wiki_debug': {}
+            }
+        )
         # Mock run_lark_cli to return cite content
-        monkeypatch.setattr('feishu_server.run_lark_cli',
-                            lambda x: {'data': {'document': {'content': '', 'document_id': 'd1'}}})
+        monkeypatch.setattr(
+            'server.lark_client.run_lark_cli',
+            lambda lark_cli, token: {
+                'data': {'document': {'content': '', 'document_id': 'd1'}}
+            }
+        )
         result = discover_sub_documents('WpK2w', auto_find_root=False)
         assert result['source'] == 'cite_fallback'
         assert result['wiki_status'] == 'error'
@@ -835,18 +839,28 @@ class TestWikiStatusContract:
         from feishu_server import discover_sub_documents
 
         # Mock wiki API: reachable, has_child=false, no children
-        monkeypatch.setattr('feishu_server.discover_via_wiki_api',
-                            lambda x: {
-                                'title': 'X', 'articles': [], 'source': 'wiki_api',
-                                'wiki_status': 'no-children',
-                                'wiki_debug': {'has_child': False},
-                            })
+        monkeypatch.setattr(
+            'server.wiki.discover_via_wiki_api',
+            lambda lark_cli, run_lark_cli_raw, token_or_url: {
+                'title': 'X', 'articles': [], 'source': 'wiki_api',
+                'wiki_status': 'no-children',
+                'wiki_debug': {'has_child': False},
+            }
+        )
         # Mock run_lark_cli to return something that would normally produce cite results
         called = {'count': 0}
-        def fake_lark(t):
+
+        def fake_lark(lark_cli, token):
             called['count'] += 1
-            return {'data': {'document': {'content': '<cite doc-id="Y"></cite>', 'document_id': 'd2'}}}
-        monkeypatch.setattr('feishu_server.run_lark_cli', fake_lark)
+            return {
+                'data': {
+                    'document': {
+                        'content': '<cite doc-id="Y"></cite>',
+                        'document_id': 'd2'
+                    }
+                }
+            }
+        monkeypatch.setattr('server.lark_client.run_lark_cli', fake_lark)
 
         result = discover_sub_documents('WpK2w', auto_find_root=False)
         # Should NOT call run_lark_cli at all (no fall-through)

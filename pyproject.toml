@@ -16,6 +16,7 @@ dev = [
 ]
 
 [tool.setuptools]
+packages = ["server"]
 py-modules = ["feishu_server"]
 
 [tool.pytest.ini_options]
