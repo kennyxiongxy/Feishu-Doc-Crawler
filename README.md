@@ -163,7 +163,24 @@ which lark-cli
 
 ### 第一步：启动本地 API 服务
 
-打开终端，进入项目目录并启动 Python 服务：
+#### 方式一：一键启动脚本（推荐）
+
+项目提供了跨平台的一键启动脚本，双击即可运行：
+
+| 平台 | 脚本路径 |
+|---|---|
+| macOS | `scripts/start-server.command` |
+| Windows | `scripts/start-server.bat` |
+| Linux | `scripts/start-server.sh` |
+
+脚本会自动：
+- 切换到项目根目录
+- 优先使用 `.venv` 虚拟环境中的 Python
+- 启动 `feishu_server.py`
+
+macOS 用户首次双击 `.command` 文件时，系统可能提示“无法打开”，请到 **系统设置 → 隐私与安全性** 中允许。
+
+#### 方式二：命令行启动
 
 ```bash
 cd /path/to/飞书文档爬取插件
@@ -175,6 +192,7 @@ python3 feishu_server.py
 ```
 🚀 飞书文档爬取 API 服务已启动
    地址: http://127.0.0.1:8765
+   lark-cli: /opt/homebrew/bin/lark-cli
    /discover - 发现子文档列表
    /extract  - 提取单个文档内容
    /open-folder - 在系统文件管理器中打开目录 (v5.10+)
@@ -188,8 +206,18 @@ python3 feishu_server.py
 
 ```bash
 python3 feishu_server.py --port 8888
-# 同时需要修改 popup.js 第 4 行的 API_BASE
+# 同时需要在扩展中设置 API 地址（见下方「自定义 API 地址」）
 ```
+
+#### 自定义 API 地址
+
+如果服务端使用了非默认端口，请在扩展弹窗的 Chrome DevTools Console 中执行：
+
+```javascript
+chrome.storage.local.set({ apiBase: 'http://127.0.0.1:8888' });
+```
+
+或在扩展选项页（后续版本将提供图形化设置入口）中配置。
 
 ### 第二步：安装 Chrome 扩展
 
