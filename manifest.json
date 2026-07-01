@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "飞书文档爬取助手",
-  "version": "5.10.3",
-  "description": "爬取飞书文档内容并保存为本地 Markdown 文件 v5.10.3 (打开文件夹: 路径引导+folderName 预填)",
+  "version": "5.10.4",
+  "description": "爬取飞书文档内容并保存为本地 Markdown 文件 v5.10.4 (补全 larkoffice.com 域名支持)",
   "permissions": [
     "activeTab",
     "storage"

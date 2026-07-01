@@ -53,6 +53,19 @@ def get_space_key(url):
     return host
 
 
+def get_base_url(url):
+    """从 URL 提取协议 + 主机名，用于构造同域名的子文档链接
+
+    如果输入不是完整 URL 或无法解析，兜底返回 https://internal.feishu.cn
+    """
+    if not isinstance(url, str):
+        return 'https://internal.feishu.cn'
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        return f'{parsed.scheme}://{parsed.netloc}'
+    return 'https://internal.feishu.cn'
+
+
 def cache_root_for_space(space_key, root_token, sub_doc_count=0):
     """缓存空间的根页面 token（保留子文档最多的那个）"""
     with _cache_lock:
@@ -217,6 +230,8 @@ def discover_via_wiki_api(lark_cli, run_lark_cli_raw, token_or_url):
     if not token:
         return {'error': 'Cannot extract token', 'source': 'wiki_api', 'wiki_status': 'error'}
 
+    base_url = get_base_url(token_or_url) if '/' in str(token_or_url) else 'https://internal.feishu.cn'
+
     # Step 1: Get node info to check has_child and get space_id
     _wiki_log(f'wiki_api: getting node info for {token[:16]}...')
     node_data = run_wiki_node_get(lark_cli, run_lark_cli_raw, token_or_url)
@@ -296,7 +311,7 @@ def discover_via_wiki_api(lark_cli, run_lark_cli_raw, token_or_url):
             articles.append({
                 'title': n.get('title', ''),
                 'doc_token': node_token,
-                'url': f'https://internal.feishu.cn/wiki/{node_token}',
+                'url': f'{base_url}/wiki/{node_token}',
                 'has_child': False,
                 'obj_token': n.get('obj_token', ''),
             })
@@ -364,7 +379,7 @@ def discover_via_wiki_api(lark_cli, run_lark_cli_raw, token_or_url):
         articles.append({
             'title': n.get('title', ''),
             'doc_token': node_token,
-            'url': f'https://internal.feishu.cn/wiki/{node_token}',
+            'url': f'{base_url}/wiki/{node_token}',
             'has_child': bool(n.get('has_child', False)),
             'obj_token': n.get('obj_token', ''),
         })

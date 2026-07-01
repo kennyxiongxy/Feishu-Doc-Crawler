@@ -27,6 +27,35 @@ function validateFolderPathInput(input) {
   return { ok: true, path };
 }
 
+// Mirror of the URL-vs-token decision from popup.js discoverChildrenOf.
+function shouldUseUrlOverToken(url) {
+  return !!(url && (url.includes('://') || url.startsWith('/wiki/') || url.includes('feishu.cn') || url.includes('larkoffice.com')));
+}
+
+// ============================================================
+// Bug #0 (v5.10.4): discoverChildrenOf must treat larkoffice.com
+// URLs as first-class URLs, not fall back to raw token.
+// ============================================================
+test('Bug #0: larkoffice.com wiki URL is sent as URL, not token', () => {
+  const url = 'https://bytedance.larkoffice.com/wiki/VU19w5z3IizvrTk6OlacyIernrx';
+  assert.equal(shouldUseUrlOverToken(url), true);
+});
+
+test('Bug #0: feishu.cn wiki URL is sent as URL, not token', () => {
+  const url = 'https://zcnv4hck1o2h.feishu.cn/wiki/VU19w5z3IizvrTk6OlacyIernrx';
+  assert.equal(shouldUseUrlOverToken(url), true);
+});
+
+test('Bug #0: bare token falls back to token request', () => {
+  assert.equal(shouldUseUrlOverToken('VU19w5z3IizvrTk6OlacyIernrx'), false);
+});
+
+test('Bug #0: empty / missing url falls back to token request', () => {
+  assert.equal(shouldUseUrlOverToken(''), false);
+  assert.equal(shouldUseUrlOverToken(null), false);
+  assert.equal(shouldUseUrlOverToken(undefined), false);
+});
+
 // ============================================================
 // Bug #1: open folder — example is NEVER used as default value,
 // it must only appear in the body text. validateFolderPathInput

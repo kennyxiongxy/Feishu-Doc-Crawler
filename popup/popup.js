@@ -1,4 +1,5 @@
-// popup.js — 飞书文档爬取助手 v5.10
+// popup.js — 飞书文档爬取助手 v5.10.4
+// v5.10.4: 补全 larkoffice.com 域名支持 — 子文档 URL 同域名构造、展开时识别 larkoffice.com URL
 // v5.10: 一键打开保存文件夹 — 服务端 /open-folder 端点，prompt 输入完整路径
 // v5.9: 暗色模式 — CSS 变量 + body.dark 覆盖；跟随系统 + 手动切换
 // v5.8: 树形展示 — 父节点可展开/折叠子文档，可"展开/折叠全部"
@@ -357,10 +358,10 @@ async function discoverChildrenOf(parentIdx) {
   if (childrenLoaded.has(parentIdx)) return { ok: true, count: 0, cached: true };
   const token = parent.doc_token || parent.token;
   if (!token) return { ok: false, reason: 'no-token' };
-  // v5.10.2: 优先用 URL (含 https:// 或 /wiki/ 或 feishu.cn), 兜底用 token
+  // v5.10.2: 优先用 URL (含 https:// 或 /wiki/ 或 feishu.cn 或 larkoffice.com), 兜底用 token
   // lark-cli 1.0.48+ 的 +node-get 对 URL 能自动推断 obj_type, 对 raw token 不行
   const url = parent.url;
-  const reqBody = (url && (url.includes('://') || url.startsWith('/wiki/') || url.includes('feishu.cn')))
+  const reqBody = (url && (url.includes('://') || url.startsWith('/wiki/') || url.includes('feishu.cn') || url.includes('larkoffice.com')))
     ? { url }
     : { token };
   loadingParents.add(parentIdx);

@@ -274,6 +274,22 @@ class TestGetSpaceKey:
         assert server_module.get_space_key("http://127.0.0.1:8765/health") == "127.0.0.1"
 
 
+class TestGetBaseUrl:
+    def test_feishu_url(self, server_module):
+        url = "https://zcnv4hck1o2h.feishu.cn/wiki/VU19w5z3IizvrTk6OlacyIernrx"
+        assert server_module.get_base_url(url) == "https://zcnv4hck1o2h.feishu.cn"
+
+    def test_larkoffice_url(self, server_module):
+        url = "https://bytedance.larkoffice.com/wiki/VU19w5z3IizvrTk6OlacyIernrx"
+        assert server_module.get_base_url(url) == "https://bytedance.larkoffice.com"
+
+    def test_non_url_fallback(self, server_module):
+        assert server_module.get_base_url("VU19w5z3IizvrTk6OlacyIernrx") == "https://internal.feishu.cn"
+
+    def test_none_fallback(self, server_module):
+        assert server_module.get_base_url(None) == "https://internal.feishu.cn"
+
+
 # ============================================================
 # clean_markdown (integration of helpers)
 # ============================================================

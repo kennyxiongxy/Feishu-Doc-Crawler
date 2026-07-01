@@ -48,6 +48,7 @@ from server.wiki import (  # noqa: F401
     cache_root_for_space,
     discover_via_wiki_api,
     extract_token_from_url,
+    get_base_url,
     get_cached_root,
     get_space_key,
     _is_obj_type_missing_error,
