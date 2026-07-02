@@ -2,7 +2,7 @@
 
 [![Version](https://img.shields.io/badge/version-5.10.4-blue.svg)](https://github.com/kennyxiongxy/Feishu-Doc-Crawler/releases/tag/v5.10.4)
 [![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-green.svg)](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3)
-[![Tests](https://img.shields.io/badge/tests-135%20passing-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-158%20passing-brightgreen.svg)](#测试)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 
 一个 Chrome/Edge 浏览器扩展（Manifest V3），从飞书 Wiki 知识库提取文档内容并保存为本地 Markdown 文件。支持单篇提取、批量提取、树形目录展示、子文档递归展开、表格/图片/高亮块/内嵌电子表格完整转换、暗色模式、一键在文件管理器中打开保存目录。
@@ -68,11 +68,11 @@
 | Chrome / Edge | 88+ | 支持 Manifest V3，建议使用最新稳定版 |
 | Python | 3.9+ | 运行本地 API 服务 |
 | lark-cli | 1.0.48+ | 飞书 CLI 工具，调用飞书 OpenAPI |
-| macOS / Linux | — | 当前仅在这两个平台测试通过 |
+| macOS / Linux / Windows | — | 已提供 macOS `.command`、Windows `.bat`、Linux `.sh` 一键启动脚本 |
 
-> **lark-cli 版本说明**：v5.10.2+ 需要 `lark-cli 1.0.48+`（修复了 `wiki +node-get` 对 raw obj_token 缺 `--obj-type` 的问题）。如果你的 `lark-cli` 低于此版本，`lark-cli update` 升级即可。
+> **lark-cli 版本说明**：v5.10.2+ 需要 `lark-cli 1.0.48+`（修复了 `wiki +node-get` 对 raw obj_token 缺 `--obj-type` 的问题）。v5.10.4+ 服务启动时会自动探测常见路径并校验最低版本，多候选路径下优先选择满足版本要求的路径。如果检测失败，扩展状态栏会给出明确提示。
 
-> **Windows 用户**：理论上可以运行，但 `lark-cli` 的安装方式和路径可能不同，需要自行调整 `feishu_server.py` 中的 `LARK_CLI` 路径。
+> **Windows 用户**：已提供 `scripts/start-server.bat`，双击即可启动；`lark-cli` 路径会被自动探测。
 
 ---
 
@@ -139,19 +139,17 @@ lark-cli auth whoami
 
 > ⚠️ **重要**：`lark-cli` 的认证 token 有时效性。如果某天插件报错「API 服务未启动」或「lark-cli failed」，请先重新执行 `lark-cli auth login` 刷新认证。
 
-### 4. 修改 lark-cli 路径（如果安装路径不同）
+### 4. 自定义 lark-cli 路径（可选）
 
-如果你的 `lark-cli` 不在 `/opt/homebrew/bin/lark-cli`，需要修改 `feishu_server.py` 第 89 行：
+v5.10.4+ 已支持自动探测：`shutil.which('lark-cli')`、常见 Homebrew 路径、以及 `LARK_CLI` 环境变量。绝大多数情况下无需手动修改。
 
-```python
-# 找到这一行：
-LARK_CLI = '/opt/homebrew/bin/lark-cli'
+如果自动探测不到，可通过环境变量指定：
 
-# 改为你的实际路径，例如：
-LARK_CLI = '/usr/local/bin/lark-cli'
+```bash
+LARK_CLI=/usr/local/bin/lark-cli python3 feishu_server.py
 ```
 
-你可以通过以下命令找到 `lark-cli` 的实际路径：
+或在启动脚本同级目录下配置环境变量。你也可以通过以下命令找到 `lark-cli` 的实际路径：
 
 ```bash
 which lark-cli
@@ -340,10 +338,21 @@ Markdown 文件中图片使用相对路径引用：`![alt](./images/xxx_1.png)`
 ```
 飞书文档爬取插件/
 ├── manifest.json              # Chrome 扩展清单（Manifest V3）
-├── feishu_server.py           # 本地 API 服务（Python HTTP Server）
+├── feishu_server.py           # 向后兼容入口，转发到 server 包
 ├── README.md                  # 本文档
 ├── pyproject.toml             # Python 项目配置（pytest + ruff）
 ├── .space_cache.json          # 空间根页面缓存（自动生成，已加入 .gitignore）
+│
+├── server/                    # 本地 API 服务（Python 包）
+│   ├── __init__.py            #   兼容入口：重新导出历史 API
+│   ├── __main__.py            #   python -m server 启动入口
+│   ├── app.py                 #   HTTP 路由
+│   ├── config.py              #   配置集中化（PORT、LARK_CLI 自动探测）
+│   ├── lark_client.py         #   lark-cli 调用、重试、限流、版本检测
+│   ├── markdown.py            #   Markdown 清洗
+│   ├── wiki.py                #   Wiki API、子文档发现、空间缓存
+│   ├── images.py              #   图片下载
+│   └── folders.py             #   打开文件夹校验
 │
 ├── popup/                     # 弹出窗口
 │   ├── popup.html             #   界面结构（v5.10+ 含 tree-debug 面板）
@@ -366,14 +375,19 @@ Markdown 文件中图片使用相对路径引用：`![alt](./images/xxx_1.png)`
 │   ├── icon48.png
 │   └── icon128.png
 │
+├── scripts/                   # 一键启动脚本（v5.10.4+）
+│   ├── start-server.command   #   macOS 双击启动
+│   ├── start-server.bat       #   Windows 双击启动
+│   └── start-server.sh        #   Linux 命令行启动
+│
 ├── tests/                     # 单元测试
 │   ├── conftest.py            #   pytest 配置（自动清理 __pycache__ 防 Chrome 拒绝加载）
-│   ├── test_server.py         #   Python 测试（pytest, 102 个）
+│   ├── test_server.py         #   Python 测试（pytest, 117 个）
 │   ├── test_concurrency.mjs   #   Node 测试：信号量/去重/取消（13 个）
 │   ├── test_search.mjs        #   Node 测试：搜索 filter（11 个）
 │   ├── test_tree.mjs          #   Node 测试：树形纯函数（47 个）
 │   ├── test_theme.mjs         #   Node 测试：主题纯函数（31 个）
-│   └── test_bugfixes.mjs      #   Node 测试：v5.10 端到端 bug 修复契约（33 个）
+│   └── test_bugfixes.mjs      #   Node 测试：v5.10 端到端 bug 修复契约（41 个）
 │
 └── .gitignore
 ```
@@ -387,10 +401,10 @@ Markdown 文件中图片使用相对路径引用：`![alt](./images/xxx_1.png)`
 Chrome Extension (popup.js)
     │  POST /discover { url }     ← v5.10.2 起优先传完整 URL
     ▼
-Python API Server (feishu_server.py)
-    │  lark-cli wiki +node-get --node-token <URL>   ← URL 路径才能自动推断 obj_type
-    │  lark-cli wiki +node-list --space-id <id> --parent-node-token <token>
-    │  (调用飞书 OpenAPI 获取文档节点树)
+Python API Server (server/app.py)
+    │  server/wiki.py     → lark-cli wiki +node-get --node-token <URL>
+    │  server/wiki.py     → lark-cli wiki +node-list --space-id <id> --parent-node-token <token>
+    │  server/lark_client.py → 版本检测、指数退避重试、并发限流
     ▼
 返回文章列表 (含 has_child) ──► popup.js 渲染树形复选框列表
     │
@@ -401,8 +415,8 @@ POST /discover { url }          ← 递归发现子文档树
     │  用户勾选并点击「开始爬取」
     ▼
 POST /extract { token }
-    │  lark-cli docs +fetch (获取 Markdown)
-    │  lark-cli docs +media-preview (下载图片)
+    │  server/lark_client.py → lark-cli docs +fetch (获取 Markdown)
+    │  server/images.py      → lark-cli docs +media-preview (下载图片)
     │  Semaphore(3) + with_retry(指数退避)
     ▼
 返回 Markdown 内容 ──► popup.js 写入本地文件系统
@@ -411,7 +425,7 @@ POST /extract { token }
     │  用户点「📁 打开」
     ▼
 POST /open-folder { path }
-    │  validate_path (绝对 + 存在 + 字符串) → open_in_os (mac/win/linux)
+    │  server/folders.py → validate_path (绝对 + 存在 + 字符串) → open_in_os (mac/win/linux)
     ▼
 在系统文件管理器中打开目录
 ```
@@ -689,7 +703,7 @@ python3 feishu_server.py
 
 | 版本 | 主要变更 |
 |------|----------|
-| v5.10.4 | 补全 `larkoffice.com` 域名支持：`server/wiki.py` 子文档 URL 基于原始 URL 同域名构造；`popup/popup.js` 展开子文档时识别 `larkoffice.com` URL；新增 8 个相关单元测试 |
+| v5.10.4 | **配置集中化 & 模块化重构**：`feishu_server.py` 拆分为 `server/` 包（app / config / lark_client / markdown / wiki / images / folders），保持旧入口兼容；**lark-cli 自动探测与版本校验**，多候选路径优先选满足 `1.0.48+` 的路径；**跨平台一键启动脚本**（`scripts/start-server.command|.bat|.sh`）；补全 `larkoffice.com` 域名支持（子文档 URL、展开时 URL 识别）；认证/授权类错误判定为永久失败，避免无效重试；根节点无子文档时列出空间根节点作为同级目录；开始爬取按钮禁用时显示更明确 tooltip；测试增至 117 Python + 41 Node |
 | v5.10.3 | 打开文件夹路径引导：💡 提示条 + folderName 预填 + 按平台的"找路径"指引 |
 | v5.10.2 | 树形展开真正根因：lark-cli `wiki +node-get` 需完整 URL（自动推断 obj_type）；新增 wiki_status / wiki_debug 字段；不再盲回退到 cite 解析；`/tmp/feishu_server_wiki.log` 服务端专项日志 |
 | v5.10.1 | 修 v5.10.0 残留坏路径（每次读取都校验占位符，失败时清掉重新提示）；树形展开错误可见性（🐛 调试面板 + 📋 复制按钮 + 错误时自动展开） |
@@ -710,27 +724,31 @@ python3 feishu_server.py
 ### 技术栈
 
 - **Chrome Extension**: Manifest V3, File System Access API, IndexedDB, chrome.storage
-- **Python**: http.server (标准库), subprocess, threading, RLock, Semaphore
+- **Python 后端**: http.server (标准库), 模块化包 `server/` (v5.10.4+), `shutil.which` + 常见路径自动探测, subprocess, threading, RLock, Semaphore
 - **飞书 API**: lark-cli（`wiki +node-get` 1.0.48+ 用 URL 路径, `wiki +node-list` 用 space_id+parent_node_token, `docs +fetch`, `docs +media-preview`）
 - **前端**: Vanilla JS ES modules, CSS 变量（无框架依赖）
+- **启动脚本**: macOS `.command` / Windows `.bat` / Linux `.sh`（v5.10.4+）
 
 ### 测试
 
-总计 **135 个测试**（102 Python + 33 Node），全部通过。
+总计 **158 个测试**（117 Python + 41 Node），全部通过。
 
-**Python 端**（102 个 pytest）：服务端纯函数
+**Python 端**（117 个 pytest）：服务端纯函数
 - Markdown 清洗、cite 解析、图片提取、token 解析、空间缓存
 - 重试分类 `is_retryable_failure` + `_extract_lark_code` + `with_retry` 指数退避
 - `run_lark_cli_limited` 信号量限流
 - Wiki API URL/token 检测（v5.10.2+）+ `wiki_status` 契约
 - `open_folder` 路径验证（绝对/存在/非字符串/空白）+ 跨平台子进程调用
+- `lark-cli` 版本解析与校验（v5.10.4+）
+- 认证/授权错误永久失败分类（v5.10.4+）
+- `larkoffice.com` 同域名 URL 构造（v5.10.4+）
 
-**JS 端**（33 个 Node）：
+**JS 端**（41 个 Node）：
 - `test_concurrency.mjs`（13）：信号量/去重/取消
 - `test_search.mjs`（11）：搜索 filter
 - `test_tree.mjs`（47）：树形纯函数
 - `test_theme.mjs`（31）：主题纯函数
-- `test_bugfixes.mjs`（37）：v5.10 端到端 bug 修复契约
+- `test_bugfixes.mjs`（41）：v5.10 端到端 bug 修复契约
 
 ```bash
 # Python 测试
@@ -746,7 +764,7 @@ node --test tests/test_theme.mjs
 node --test tests/test_bugfixes.mjs
 ```
 
-测试覆盖：`cell_to_text`、`clean_rich_text_in_markdown`、`parse_cite_elements`、`extract_title_from_markdown`、`extract_images`、`extract_token_from_url`、`get_space_key`、`clean_markdown`（含 callout/cite/富文本段/空行合并）、空间根缓存的"取最多子文档"逻辑、`is_retryable_failure` 永久/瞬时错误分类、`_extract_lark_code` JSON 错误码解析、`with_retry` 指数退避 + 永久错误立即返回、`run_lark_cli_limited` 信号量限流、`Semaphore` JS 信号量、`runPool` 信号量限流 + 取消语义、`allocUniqueName` 原子链式去重 + 跨目录隔离、搜索 filter 大小写不敏感/中文匹配/空集/selectedSet 跨筛选保持、树形 `getDepth` 循环检测、`computeVisible` 展开/搜索/祖先链、`getParentIndices`/`allExpanded`/`insertChildrenAfter` 不可变性、主题 `resolveInitialTheme` 用户偏好覆盖/跟随系统/非法值降级、`resolveNextTheme` 切换 + 未知值默认亮色、按钮图标/aria-label 联动、主题持久化往返、`open_folder` 路径验证（绝对/存在/非字符串/空白）、`open_folder_in_os` 跨平台子进程调用（Darwin/Win/Linux/未知 + 失败回退）、`/open-folder` HTTP 端点端到端、Wiki API URL 检测、wiki_status 透传契约、不盲回退 cite 解析、folderName 预填路径、提示条显隐。
+测试覆盖：`cell_to_text`、`clean_rich_text_in_markdown`、`parse_cite_elements`、`extract_title_from_markdown`、`extract_images`、`extract_token_from_url`、`get_space_key`、`get_base_url`（v5.10.4+）、`clean_markdown`（含 callout/cite/富文本段/空行合并）、空间根缓存的"取最多子文档"逻辑、`is_retryable_failure` 永久/瞬时错误分类（含认证/授权错误）、`_extract_lark_code` JSON 错误码解析、`with_retry` 指数退避 + 永久错误立即返回、`run_lark_cli_limited` 信号量限流、`parse_lark_cli_version` / `is_lark_cli_version_ok` 版本解析与校验、`Semaphore` JS 信号量、`runPool` 信号量限流 + 取消语义、`allocUniqueName` 原子链式去重 + 跨目录隔离、搜索 filter 大小写不敏感/中文匹配/空集/selectedSet 跨筛选保持、树形 `getDepth` 循环检测、`computeVisible` 展开/搜索/祖先链、`getParentIndices`/`allExpanded`/`insertChildrenAfter` 不可变性、主题 `resolveInitialTheme` 用户偏好覆盖/跟随系统/非法值降级、`resolveNextTheme` 切换 + 未知值默认亮色、按钮图标/aria-label 联动、主题持久化往返、`open_folder` 路径验证（绝对/存在/非字符串/空白）、`open_folder_in_os` 跨平台子进程调用（Darwin/Win/Linux/未知 + 失败回退）、`/open-folder` HTTP 端点端到端、Wiki API URL 检测、wiki_status 透传契约、不盲回退 cite 解析、folderName 预填路径、提示条显隐。
 
 ---
 
