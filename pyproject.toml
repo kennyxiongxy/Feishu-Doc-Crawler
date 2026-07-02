@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "feishu-doc-crawler"
-version = "5.5.0"
+version = "5.10.4"
 description = "Local API server for the 飞书文档爬取 Chrome extension"
 requires-python = ">=3.9"
 dependencies = []
@@ -16,6 +16,7 @@ dev = [
 ]
 
 [tool.setuptools]
+packages = ["server"]
 py-modules = ["feishu_server"]
 
 [tool.pytest.ini_options]

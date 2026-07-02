@@ -4,9 +4,7 @@ These tests cover the text-processing pipeline that runs on every
 crawled document. No subprocess / network calls — only pure functions.
 """
 import os
-import tempfile
 
-import pytest
 
 # All tests use the `server_module` fixture from conftest.py
 # which loads feishu_server.py by file path.
@@ -268,9 +266,28 @@ class TestGetSpaceKey:
         url = "https://test.feishu.cn/wiki/abc"
         assert server_module.get_space_key(url) == "test"
 
+    def test_larkoffice_subdomain(self, server_module):
+        assert server_module.get_space_key("https://bytedance.larkoffice.com/wiki/xxx") == "bytedance"
+
     def test_localhost(self, server_module):
         # Should return hostname as-is for non-feishu hosts
         assert server_module.get_space_key("http://127.0.0.1:8765/health") == "127.0.0.1"
+
+
+class TestGetBaseUrl:
+    def test_feishu_url(self, server_module):
+        url = "https://zcnv4hck1o2h.feishu.cn/wiki/VU19w5z3IizvrTk6OlacyIernrx"
+        assert server_module.get_base_url(url) == "https://zcnv4hck1o2h.feishu.cn"
+
+    def test_larkoffice_url(self, server_module):
+        url = "https://bytedance.larkoffice.com/wiki/VU19w5z3IizvrTk6OlacyIernrx"
+        assert server_module.get_base_url(url) == "https://bytedance.larkoffice.com"
+
+    def test_non_url_fallback(self, server_module):
+        assert server_module.get_base_url("VU19w5z3IizvrTk6OlacyIernrx") == "https://internal.feishu.cn"
+
+    def test_none_fallback(self, server_module):
+        assert server_module.get_base_url(None) == "https://internal.feishu.cn"
 
 
 # ============================================================
@@ -512,8 +529,7 @@ class TestWithRetry:
 class TestLarkCliLimiter:
     def test_semaphore_limits_concurrent_calls(self, server_module):
         import threading
-        sem = server_module._lark_cli_semaphore
-        # Sanity: this is a Semaphore(3) object with internal counter
+        # Sanity: _lark_cli_semaphore is a Semaphore(3) object with internal counter
         # We can't easily check the exact limit value, but we can verify
         # run_lark_cli_limited respects concurrency.
         active = 0
@@ -543,7 +559,6 @@ class TestLarkCliLimiter:
 
     def test_run_lark_cli_limited_uses_retry(self, server_module, monkeypatch):
         # Stub out the semaphore & retry internals to count attempts
-        import feishu_server as fs
         calls = []
 
         def stub():
@@ -821,11 +836,19 @@ class TestWikiStatusContract:
         from feishu_server import discover_sub_documents
 
         # Mock wiki API to return error → should fall through to cite
-        monkeypatch.setattr('feishu_server.discover_via_wiki_api',
-                            lambda x: {'error': 'boom', 'wiki_status': 'error', 'wiki_debug': {}})
+        monkeypatch.setattr(
+            'server.wiki.discover_via_wiki_api',
+            lambda lark_cli, run_lark_cli_raw, token_or_url: {
+                'error': 'boom', 'wiki_status': 'error', 'wiki_debug': {}
+            }
+        )
         # Mock run_lark_cli to return cite content
-        monkeypatch.setattr('feishu_server.run_lark_cli',
-                            lambda x: {'data': {'document': {'content': '', 'document_id': 'd1'}}})
+        monkeypatch.setattr(
+            'server.lark_client.run_lark_cli',
+            lambda lark_cli, token: {
+                'data': {'document': {'content': '', 'document_id': 'd1'}}
+            }
+        )
         result = discover_sub_documents('WpK2w', auto_find_root=False)
         assert result['source'] == 'cite_fallback'
         assert result['wiki_status'] == 'error'
@@ -835,18 +858,28 @@ class TestWikiStatusContract:
         from feishu_server import discover_sub_documents
 
         # Mock wiki API: reachable, has_child=false, no children
-        monkeypatch.setattr('feishu_server.discover_via_wiki_api',
-                            lambda x: {
-                                'title': 'X', 'articles': [], 'source': 'wiki_api',
-                                'wiki_status': 'no-children',
-                                'wiki_debug': {'has_child': False},
-                            })
+        monkeypatch.setattr(
+            'server.wiki.discover_via_wiki_api',
+            lambda lark_cli, run_lark_cli_raw, token_or_url: {
+                'title': 'X', 'articles': [], 'source': 'wiki_api',
+                'wiki_status': 'no-children',
+                'wiki_debug': {'has_child': False},
+            }
+        )
         # Mock run_lark_cli to return something that would normally produce cite results
         called = {'count': 0}
-        def fake_lark(t):
+
+        def fake_lark(lark_cli, token):
             called['count'] += 1
-            return {'data': {'document': {'content': '<cite doc-id="Y"></cite>', 'document_id': 'd2'}}}
-        monkeypatch.setattr('feishu_server.run_lark_cli', fake_lark)
+            return {
+                'data': {
+                    'document': {
+                        'content': '<cite doc-id="Y"></cite>',
+                        'document_id': 'd2'
+                    }
+                }
+            }
+        monkeypatch.setattr('server.lark_client.run_lark_cli', fake_lark)
 
         result = discover_sub_documents('WpK2w', auto_find_root=False)
         # Should NOT call run_lark_cli at all (no fall-through)
@@ -854,3 +887,37 @@ class TestWikiStatusContract:
         assert result['source'] == 'wiki_api'
         assert result['wiki_status'] == 'no-children'
         assert result['articles'] == []
+
+
+class TestLarkCliVersion:
+    """lark-cli 版本解析与校验（02 优化项）"""
+
+    def test_parse_version_standard(self, server_module):
+        assert server_module.parse_lark_cli_version('1.0.53') == (1, 0, 53)
+
+    def test_parse_version_with_prefix(self, server_module):
+        assert server_module.parse_lark_cli_version('lark-cli version 1.0.48') == (1, 0, 48)
+
+    def test_parse_version_none(self, server_module):
+        assert server_module.parse_lark_cli_version(None) is None
+
+    def test_parse_version_empty(self, server_module):
+        assert server_module.parse_lark_cli_version('') is None
+
+    def test_parse_version_no_numbers(self, server_module):
+        assert server_module.parse_lark_cli_version('unknown') is None
+
+    def test_version_ok_meets_min(self, server_module):
+        assert server_module.is_lark_cli_version_ok((1, 0, 48)) is True
+
+    def test_version_ok_above_min(self, server_module):
+        assert server_module.is_lark_cli_version_ok((1, 1, 0)) is True
+
+    def test_version_ok_below_min(self, server_module):
+        assert server_module.is_lark_cli_version_ok((1, 0, 47)) is False
+
+    def test_version_ok_none(self, server_module):
+        assert server_module.is_lark_cli_version_ok(None) is False
+
+    def test_min_version_constant(self, server_module):
+        assert server_module.LARK_CLI_MIN_VERSION == (1, 0, 48)

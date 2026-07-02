@@ -1,4 +1,5 @@
-// popup.js — 飞书文档爬取助手 v5.10
+// popup.js — 飞书文档爬取助手 v5.10.4
+// v5.10.4: 补全 larkoffice.com 域名支持 — 子文档 URL 同域名构造、展开时识别 larkoffice.com URL
 // v5.10: 一键打开保存文件夹 — 服务端 /open-folder 端点，prompt 输入完整路径
 // v5.9: 暗色模式 — CSS 变量 + body.dark 覆盖；跟随系统 + 手动切换
 // v5.8: 树形展示 — 父节点可展开/折叠子文档，可"展开/折叠全部"
@@ -20,7 +21,23 @@ import {
   themeButtonLabel,
 } from './theme.js';
 
-const API_BASE = 'http://127.0.0.1:8765';
+// 可配置项：默认值 + 允许从 chrome.storage.local 覆盖
+const CONFIG = {
+  apiBase: 'http://127.0.0.1:8765',
+  maxArticleConcurrency: 3,
+  maxImageConcurrency: 2,
+};
+
+// 脚本加载时立即尝试读取用户自定义配置
+(async function loadRuntimeConfig() {
+  try {
+    const stored = await chrome.storage.local.get(['apiBase']);
+    if (stored.apiBase) CONFIG.apiBase = stored.apiBase;
+    console.log('[Popup] API base:', CONFIG.apiBase);
+  } catch (e) {
+    console.warn('[Popup] Failed to load runtime config:', e.message);
+  }
+})();
 
 // ============================================================
 // IndexedDB 持久化目录句柄
@@ -115,9 +132,9 @@ let originalUrl = '';
 let serverAvailable = false;
 let needsReauth = false;  // true 表示有已保存的句柄但需要用户手势重新授权
 
-// Concurrency tuning
-const MAX_ARTICLE_CONCURRENCY = 3;   // parallel articles (each holds 1 lark-cli call)
-const MAX_IMAGE_CONCURRENCY = 2;     // parallel image downloads per article
+// Concurrency tuning (now centralized in CONFIG)
+const MAX_ARTICLE_CONCURRENCY = CONFIG.maxArticleConcurrency;
+const MAX_IMAGE_CONCURRENCY = CONFIG.maxImageConcurrency;
 
 // Live crawl counters (shared across workers — safe in single-threaded JS)
 let inFlightTitles = new Set();      // article titles currently being processed
@@ -217,18 +234,40 @@ async function toggleTheme() {
 // ============================================================
 // API 调用
 // ============================================================
+// Live lark-cli status from /health (path/version/version_ok/min_version)
+let larkCliStatus = null;
+
 async function checkServer() {
   try {
-    const resp = await fetch(`${API_BASE}/health`, { method: 'GET', signal: abortTimeout(3000) });
-    if (resp.ok) { const data = await resp.json(); if (data.status === 'ok') { serverAvailable = true; return true; } }
+    const resp = await fetch(`${CONFIG.apiBase}/health`, { method: 'GET', signal: abortTimeout(3000) });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.status === 'ok') {
+        serverAvailable = true;
+        larkCliStatus = data.lark_cli || null;
+        return true;
+      }
+    }
   } catch (e) { console.log('[Popup] Server check failed:', e.message); }
   serverAvailable = false;
+  larkCliStatus = null;
   return false;
+}
+
+function getLarkCliWarning() {
+  if (!larkCliStatus) return '';
+  if (!larkCliStatus.version) {
+    return `（未检测到 lark-cli 版本，请执行：lark-cli auth login）`;
+  }
+  if (!larkCliStatus.version_ok) {
+    return `（lark-cli ${larkCliStatus.version} 版本过低，建议升级：lark-cli update）`;
+  }
+  return '';
 }
 
 async function callApi(endpoint, body) {
   console.log(`[Popup] API ${endpoint} <-`, JSON.stringify(body).substring(0, 80));
-  const resp = await fetch(`${API_BASE}${endpoint}`, {
+  const resp = await fetch(`${CONFIG.apiBase}${endpoint}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -319,10 +358,10 @@ async function discoverChildrenOf(parentIdx) {
   if (childrenLoaded.has(parentIdx)) return { ok: true, count: 0, cached: true };
   const token = parent.doc_token || parent.token;
   if (!token) return { ok: false, reason: 'no-token' };
-  // v5.10.2: 优先用 URL (含 https:// 或 /wiki/ 或 feishu.cn), 兜底用 token
+  // v5.10.2: 优先用 URL (含 https:// 或 /wiki/ 或 feishu.cn 或 larkoffice.com), 兜底用 token
   // lark-cli 1.0.48+ 的 +node-get 对 URL 能自动推断 obj_type, 对 raw token 不行
   const url = parent.url;
-  const reqBody = (url && (url.includes('://') || url.startsWith('/wiki/') || url.includes('feishu.cn')))
+  const reqBody = (url && (url.includes('://') || url.startsWith('/wiki/') || url.includes('feishu.cn') || url.includes('larkoffice.com')))
     ? { url }
     : { token };
   loadingParents.add(parentIdx);
@@ -471,7 +510,7 @@ async function init() {
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !tab.url || !tab.url.includes('feishu.cn')) {
+    if (!tab || !tab.url || (!tab.url.includes('feishu.cn') && !tab.url.includes('larkoffice.com'))) {
       showError('请在飞书文档页面使用此插件');
       return;
     }
@@ -479,8 +518,9 @@ async function init() {
 
     // 检查服务器
     const serverOk = await checkServer();
+    const larkWarning = getLarkCliWarning();
     $serverStatus.innerHTML = serverOk
-      ? '<span class="server-ok">● API 服务就绪</span>'
+      ? `<span class="server-ok">● API 服务就绪</span>${larkWarning ? `<br><span class="server-err" style="font-size:11px">${larkWarning}</span>` : ''}`
       : '<span class="server-err">● API 服务未启动，使用 DOM 模式</span>';
 
     let apiArticles = [];
@@ -553,8 +593,9 @@ async function init() {
 
     updateStartButton();
 
+    const finalLarkWarning = getLarkCliWarning();
     $serverStatus.innerHTML = serverOk
-      ? `<span class="server-ok">● API 服务就绪（${articles.length} 篇）</span>`
+      ? `<span class="server-ok">● API 服务就绪（${articles.length} 篇）</span>${finalLarkWarning ? `<br><span class="server-err" style="font-size:11px">${finalLarkWarning}</span>` : ''}`
       : '<span class="server-err">● API 服务未启动</span>';
 
   } catch (err) {
@@ -585,8 +626,13 @@ function updateStartButton() {
   // 需要：至少选一篇文章 + 有文件夹名 + dirHandle 可用（不处于待授权状态）
   const hasDir = dirHandle && !needsReauth && folderName;
   $btnStart.disabled = (sel.length === 0) || !hasDir;
-  if (!hasDir && folderName && needsReauth) {
-    $btnStart.title = '请先点击"选择文件夹"重新授权';
+
+  if (sel.length === 0) {
+    $btnStart.title = '请至少选择一篇文章';
+  } else if (!folderName) {
+    $btnStart.title = '请先点击左侧「选择文件夹」';
+  } else if (needsReauth) {
+    $btnStart.title = '请先点击「选择文件夹」重新授权';
   } else {
     $btnStart.title = '';
   }
